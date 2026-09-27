@@ -116,7 +116,7 @@ async function main() {
   const t0 = Date.now();
   const stats = await run({ db: getFirestore(), Timestamp, send, appUrl: process.env.APP_URL || 'https://abusedwaffle.github.io/sammenskudsgilde/', dryRun });
   send.flush();
-  console.log(`Færdig på ${Date.now() - t0} ms:`, JSON.stringify(stats));
+  console.log(`Færdig på ${Date.now() - t0} ms: ` + Object.entries(stats).map(([k, v]) => `${k}=${v}`).join(' '));
   if (stats.failed) process.exitCode = 0; // enkelte fejl skal ikke gøre workflowet rødt – de prøves igen
 }
 
