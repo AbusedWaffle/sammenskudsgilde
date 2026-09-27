@@ -235,3 +235,8 @@ select{background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 .tr-party{display:inline-flex;align-items:center;gap:6px;min-width:0}
 .tr-party small{display:block;font-size:12px;color:var(--muted);font-weight:700;line-height:1.1}
 select[data-t=item-who]{margin-top:0}
+.childbox{margin-top:12px}
+.childbox label{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:2px solid var(--line);border-radius:12px;font-weight:700;cursor:pointer}
+.childbox input{width:20px;height:20px;accent-color:var(--tomato)}
+.childbox p{margin:6px 2px 0}
+.nmbtn{padding:0;font-size:inherit;color:inherit;text-decoration:underline dotted;text-underline-offset:3px}

@@ -248,9 +248,10 @@ export async function createStore() {
       return id;
     },
     /** "Det er mig": overtag en person uden bruger. Samme ID, så retter og udgifter følger med. */
-    claim: (pid, person, { name, phone, status }) => b.batch([
+    claim: (pid, person, { name, phone, status, isChild }) => b.batch([
       ...(person.householdId ? [{ op: 'update', path: ['parties', pid, 'households', person.householdId], data: { memberUids: b.union(b.uid) } }] : []),
-      { op: 'update', path: ['parties', pid, 'participants', person.id], data: { ownerUid: b.uid, name, phone, status } },
+      { op: 'update', path: ['parties', pid, 'participants', person.id], data: { ownerUid: b.uid, name, phone, status,
+        ...(typeof isChild === 'boolean' && isChild !== !!person.isChild ? { isChild } : {}) } },   // kun sendt ved ændring
     ]),
 
     /** Aktivitetslog til notifikationer. Fejl her må aldrig stoppe selve handlingen. */

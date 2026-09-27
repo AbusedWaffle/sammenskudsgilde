@@ -33,8 +33,8 @@ rules_version = '2';
 //    størrelsesgrænser på felterne, men ingen hastighedsbegrænsning. Overvej App Check,
 //    hvis det bliver et problem.
 //  • Alle med linket kan melde sig ind i en husstand (ingen godkendelse) og derefter
-//    rette dens personer uden bruger – og kan sige "Det er mig" til en voksen uden
-//    bruger. Det er et bevidst valg for en venne-app; værten kan rette alt tilbage.
+//    rette dens personer uden bruger – og kan sige "Det er mig" til en person uden
+//    bruger (også et barn). Det er et bevidst valg for en venne-app; værten kan rette alt tilbage.
 //  • Reglerne kan ikke garantere, at beløb er "rigtige" – kun at de er heltal i øre
 //    inden for et fornuftigt interval.
 //  • Når et gilde slettes, sletter appen først under-dokumenterne. Efterladte
@@ -145,7 +145,7 @@ service cloud.firestore {
       // ── Deltagere ────────────────────────────────────────────────────────────
       // ownerUid = brugeren (enheden) der ejer deltageren. ownerUid == '' betyder "uden egen bruger"
       // (fx et barn eller en partner, som et husstandsmedlem har tilføjet; addedByUid = hvem).
-      // Den, der åbner linket, kan overtage en voksen uden bruger ("Det er mig") – samme ID, så
+      // Den, der åbner linket, kan overtage en person uden bruger ("Det er mig") – samme ID, så
       // retter og udgifter følger med. Alle felter ud over name/phone/ownerUid er valgfri, så
       // deltagere oprettet af den tidligere version af appen stadig er gyldige.
       function validParticipant(d) {
@@ -193,10 +193,10 @@ service cloud.firestore {
             // et medlem af husstanden retter en person uden bruger (navn, tlf., barn, status …)
             || (resource.data.ownerUid == '' && request.resource.data.ownerUid == ''
               && inHousehold(pid, hhOf(resource.data)) && householdChangeOk(pid))
-            // "Det er mig": overtag en voksen uden bruger (samme ID). Man bliver samtidig medlem af husstanden.
+            // "Det er mig": overtag en person uden bruger – voksen eller barn – (samme ID). Man bliver samtidig
+            // medlem af husstanden og må rette navn, telefon, status og om man er barn.
             || (resource.data.ownerUid == '' && request.resource.data.ownerUid == request.auth.uid
-              && resource.data.get('isChild', false) != true
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUid', 'name', 'phone', 'status'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUid', 'name', 'phone', 'status', 'isChild'])
               && (hhOf(resource.data) == '' || inHouseholdAfter(pid, hhOf(resource.data))))
           );
         allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid)

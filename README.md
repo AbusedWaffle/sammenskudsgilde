@@ -18,7 +18,11 @@ Tip: Tryk på del-knappen i browseren og vælg **Føj til hjemmeskærm**, så li
 1. Gæsten åbner linket (eller scanner QR-koden).
 2. Skriver sit **navn** og **telefonnummer** og trykker **Tilmeld mig**. Så kan de andre se, hvem man er, og betale en tilbage via MobilePay.
 3. Telefonen husker, hvem man er, næste gang linket åbnes. Låner man en andens telefon, trykker man **Jeg er ikke …** og tilmelder sig som ny person.
-4. Har en anden allerede skrevet dig på (fx din partner), spørger appen **Er du en af disse?**. Tryk **Det er mig** ved dit navn og skriv dit nummer. Så overtager du pladsen, og det, der allerede står på dig, følger med. Er du ikke på listen, så tryk **Nej, jeg er ny**.
+4. Har en anden allerede skrevet dig på (fx din partner eller dine forældre), spørger appen **Er du en af disse?**. Tryk **Det er mig** ved dit navn og skriv dit nummer. Så overtager du pladsen, og det, der allerede står på dig, følger med. Børn står med "(barn)" og kan også trykke Det er mig. Er du ikke på listen, så tryk **Nej, jeg er ny**.
+5. **Er du barn?** Sæt flueben ved **Jeg er barn**, når du tilmelder dig. Så behøver du ikke skrive telefonnummer, og du betaler ikke med, når en udgift deles pr. person.
+
+## Ret din tilmelding
+Tryk på tandhjulet **⚙️** → **Ret min tilmelding** (eller tryk på dit eget navn på gæstelisten). Her kan du rette navn, telefonnummer, om du er barn, og om du kommer. Tryk **Gem min tilmelding**, så står der "Din tilmelding er gemt ✓".
 
 ## Kommer du? ✅ 🤔 ❌
 Øverst i gildet vælger du **Kommer**, **Måske** eller **Kommer ikke** (standard er Kommer). Du kan ændre det når som helst.
@@ -27,7 +31,7 @@ Fanen **👥 Gæster** er gæstelisten: øverst står, hvor mange **voksne og b�
 
 ## Husstande 🏠 (partner, børn, søskende …)
 - Tryk **🏠 Kommer du med nogen? Opret husstand**, giv husstanden et navn (fx "Familien Hansen"), og tryk **Opret husstand**.
-- Tryk **+ Tilføj person** og skriv dem på, du kommer med, også selvom de ikke selv har appen: navn, evt. telefonnummer, og om det er et **barn**.
+- Tryk **+ Tilføj person** og skriv dem på, du kommer med, også selvom de ikke selv har appen: navn, evt. telefonnummer, og om det er et **barn**. Børn betaler ikke med, når en udgift deles pr. person. Deles den pr. husstand, betaler husstanden det samme uanset antal børn.
 - Er din familie allerede skrevet på, så tryk **Tilføj mig** ved deres husstand. Det kræver ingen godkendelse. Man kan kun være med i én husstand pr. gilde.
 - Alle i husstanden, der har tilmeldt sig selv, kan rette og fjerne husstandens personer uden egen bruger og melde dem til og fra (fx "Sofie kommer måske"). Man kan ikke rette en anden, der selv har tilmeldt sig (det kan kun værten).
 - Fjerner du en person, der har skrevet noget på, flyttes det over til dig, så regnskabet stadig passer.
@@ -37,9 +41,11 @@ Fanen **👥 Gæster** er gæstelisten: øverst står, hvor mange **voksne og b�
 ## Retter, aktiviteter og udgifter
 - Under hvert punkt trykker man **+ Jeg tager noget med** og skriver, **hvad** man tager med (en ret, en aktivitet eller andet), **til hvor mange personer**, en evt. **note** (fx "vegetarisk") og evt. **hvad det kostede** i kr.
 - En udgift kan deles på tre måder:
-  - **Alle (pr. person):** lige meget pr. person blandt dem, der kommer. Børn tæller som en person. Dem, der har meldt **Kommer ikke**, er ikke med.
-  - **Pr. husstand:** hver husstand betaler lige meget, uanset hvor mange de er. Du kan vælge alle husstande eller kun nogle.
-  - **Udvalgte:** kun de personer, du vælger (fx vin kun til dem, der drikker).
+  - **Alle (pr. person):** lige meget pr. voksen blandt dem, der kommer. **Børn betaler ikke med**, og det gør dem, der har meldt **Kommer ikke**, heller ikke.
+  - **Pr. husstand:** hver husstand betaler lige meget, uanset hvor mange de er, og uanset hvor mange børn de har. Du kan vælge alle husstande eller kun nogle.
+  - **Udvalgte:** kun de voksne, du vælger (fx vin kun til dem, der drikker). Børn står ikke på listen.
+- Har et barn lagt ud for noget, får barnets husstand (eller barnet) stadig pengene tilbage.
+- Reglerne gælder også for udgifter, der allerede er skrevet på: retter nogen, om de er barn, regnes det hele om med det samme.
 - Udgifter, der ikke hører til en ret (leje af lokale, vin, indkøb), tilføjes under fanen **💰 Regnskab** med **Tilføj en udgift**.
 - Alle kan se, hvad de andre tager med. Man kan rette og slette sine egne ting med ✏️.
 

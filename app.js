@@ -3,7 +3,7 @@ import { settle, parseKr, formatKr, headcount, statusOf, unitsOf } from './settl
 import { cleanPhone, prettyPhone, mobilepayPhone, isValidPhone } from './util.js';
 import { pushSupport, subscribePush, localNotification, registerServiceWorker, isIOS as isIOSDevice, isStandalone, deviceLabel } from './push.js';
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
 const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['reminder', '⏰ Påmindelse før festen']];
 
@@ -64,6 +64,10 @@ const EVENT_ICONS = [[/forret|starter|suppe/i, '🥗'], [/hovedret|middag|aftens
   [/leg|spil|aktivitet|quiz|lege/i, '🎲'], [/musik|dans|fest/i, '🎶'], [/tale|sang/i, '🎤']];
 const eventIcon = ev => (EVENT_ICONS.find(([re]) => re.test(ev.title)) || [0, ev.kind === 'program' ? '⏰' : '🍽️'])[1];
 const STATUS = { yes: ['✅', 'Kommer', 'kommer'], maybe: ['🤔', 'Kommer måske', 'kommer måske'], no: ['❌', 'Kommer ikke', 'kommer ikke'] };
+const CHILD_HELP = 'Børn betaler ikke med, når en udgift deles pr. person. Deles den pr. husstand, betaler husstanden det samme uanset antal børn.';
+/** "Barn"-afkrydsning med kort forklaring. */
+const childBox = (label, checked, t = 'is-child') => `<div class="childbox"><label><input type="checkbox" name="isChild" data-t="${t}" ${checked ? 'checked' : ''}> 🧒 ${label}</label>
+  <p class="small muted" data-t="child-help">${CHILD_HELP}</p></div>`;
 const ITEM_KINDS = { ret: ['🍽️', 'Ret'], aktivitet: ['🎲', 'Aktivitet'], andet: ['🎁', 'Andet'], udgift: ['🧾', 'Udgift'] };
 
 // ───────────────────────────── Tilstand ─────────────────────────────
@@ -151,11 +155,11 @@ function render() {
   const app = $('#app');
   const y = scrollY;
   // Bevar indtastning i formularer på siden, når live-opdateringer tegner siden igen.
-  const kept = $$('form[id] input:not([type=hidden]), form[id] textarea', app).map(el => ({ f: el.form.id, n: el.name, v: el.value, focus: el === document.activeElement, sel: el.selectionStart }));
+  const kept = $$('form[id] input:not([type=hidden]), form[id] textarea', app).map(el => ({ f: el.form.id, n: el.name, v: el.value, c: el.checked, box: el.type === 'checkbox', focus: el === document.activeElement, sel: el.selectionStart }));
   app.innerHTML = S.view === 'home' ? homeView() : partyView();
   for (const k of kept) {
     const el = $(`form#${k.f} [name="${k.n}"]`, app); if (!el) continue;
-    el.value = k.v;
+    if (k.box) el.checked = k.c; else el.value = k.v;
     if (k.focus) { el.focus(); try { el.setSelectionRange(k.sel, k.sel); } catch {} }
   }
   if (S.view === 'party' && S.tab === 'del') drawQr();
@@ -266,23 +270,24 @@ function identityBar() {
   }
   const prof = LS.get('sg:profile', {});
   const mineHere = S.participants.filter(p => p.ownerUid === store.uid);
-  const claimable = claimableAdults();
+  const claimable = claimablePeople();
   return `${claimable.length && !S.skipClaim ? claimCard(claimable) : ''}<form class="card join" id="join-form" autocomplete="on">
     <h2>${claimable.length && !S.skipClaim ? 'Ellers: tilmeld dig som ny' : 'Hvem er du? 👋'}</h2>
     <p class="small muted" style="margin:4px 0 0">Skriv dit navn og telefonnummer, så de andre kan se hvem du er (og betale dig tilbage via MobilePay).</p>
     ${mineHere.length ? `<div class="chips" style="margin-top:10px">${mineHere.map(p => `<button type="button" class="chip solid" data-act="be" data-id="${p.id}">Jeg er ${esc(p.name)}</button>`).join('')}</div>` : ''}
     <label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required autocomplete="name" value="${esc(prof.name || '')}" placeholder="Dit navn"></label>
-    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required autocomplete="tel" inputmode="tel" value="${esc(prof.phone || '')}" placeholder="12 34 56 78"></label>
+    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" autocomplete="tel" inputmode="tel" value="${esc(prof.phone || '')}" placeholder="12 34 56 78"></label>
+    ${childBox('Jeg er barn', false, 'join-child')}
     <div class="err" id="join-err"></div>
     <button class="btn primary block" style="margin-top:12px" data-t="join">Tilmeld mig</button>
   </form>`;
 }
 
-const claimableAdults = () => hhOn() ? sortedPeople().filter(p => unclaimed(p) && !p.isChild) : [];
+const claimablePeople = () => hhOn() ? sortedPeople().filter(unclaimed) : [];
 function claimCard(list) {
   return `<div class="card claim" data-t="claim-card"><h2>Er du en af disse? 👋</h2>
     <p class="small muted" style="margin:4px 0 8px">Nogen har allerede skrevet dig på. Tryk „Det er mig“, så overtager du din plads – med det, der allerede står på dig.</p>
-    <ul class="people">${list.map(p => `<li class="person" data-t="claim-person">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}</div>
+    <ul class="people">${list.map(p => `<li class="person" data-t="claim-person">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}${p.isChild ? ' <span class="muted small" data-t="claim-child">(barn)</span>' : ''}</div>
       <div class="small muted">${hhOfP(p) ? '🏠 ' + esc(hhOfP(p).name) : ''}${p.addedByUid ? ` · skrevet på af ${esc(adderName(p))}` : ''}</div></div>
       <button class="btn sm green" data-act="claim" data-id="${p.id}" data-t="claim">Det er mig</button></li>`).join('')}</ul>
     <p class="small muted" style="margin:10px 0 0">Ikke dig? <button class="linkbtn small" data-act="skip-claim" data-t="skip-claim">Nej, jeg er ny</button></p></div>`;
@@ -359,10 +364,11 @@ function personRow(p) {
   const st = statusOf(p), edit = canEditPerson(p), mine = p.id === myId();
   const info = [p.phone ? `<a href="tel:${esc(cleanPhone(p.phone))}">${esc(prettyPhone(p.phone))}</a>` : (unclaimed(p) ? `skrevet på af ${esc(adderName(p))}` : 'Intet nummer')];
   if (its.length) info.push(its.map(i => esc(i.title)).join(', '));
-  return `<li class="person${st === 'no' ? ' is-no' : ''}" data-t="person" data-name="${esc(p.name)}">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}${mine ? '<span class="tag">dig</span>' : ''}${host ? '<span class="tag host">vært</span>' : ''}${p.isChild ? '<span class="tag kid">barn</span>' : ''}</div>
+  return `<li class="person${st === 'no' ? ' is-no' : ''}" data-t="person" data-name="${esc(p.name)}">${avatar(p)}<div class="grow"><div class="nm">${mine && p.ownerUid === store.uid ? `<button class="linkbtn nmbtn" data-act="edit-me" title="Ret min tilmelding">${esc(p.name)}</button>` : esc(p.name)}${mine ? '<span class="tag">dig</span>' : ''}${host ? '<span class="tag host">vært</span>' : ''}${p.isChild ? '<span class="tag kid">barn</span>' : ''}</div>
       <div class="small muted">${info.join(' · ')}</div>
       ${!hhOn() ? '' : edit && !mine ? rsvpSeg(p, true) : `<div class="st st-${st}" data-t="status">${STATUS[st][0]} ${STATUS[st][1]}</div>`}</div>
-      ${edit && !mine && hhOn() ? `<button class="btn sm ghost" data-act="edit-person" data-id="${p.id}" data-t="edit-person" aria-label="Ret ${esc(p.name)}">✏️</button>`
+      ${mine && p.ownerUid === store.uid ? `<button class="btn sm ghost" data-act="edit-me" data-t="edit-me-row" aria-label="Ret min tilmelding">✏️</button>`
+        : edit && !mine && hhOn() ? `<button class="btn sm ghost" data-act="edit-person" data-id="${p.id}" data-t="edit-person" aria-label="Ret ${esc(p.name)}">✏️</button>`
         : edit && !mine ? `<button class="btn sm ghost" data-act="remove-person" data-id="${p.id}" data-t="remove-person" aria-label="Fjern">✕</button>` : ''}</li>`;
 }
 
@@ -396,7 +402,7 @@ function splitText(it, short = false) {
     return n ? `deles pr. husstand mellem ${n}` : 'deles pr. husstand';
   }
   if (it.split === 'selected') {
-    const ids = (it.among || []).filter(pById);
+    const ids = (it.among || []).filter(id => pById(id) && !pById(id).isChild);
     return short ? `deles af ${ids.length}` : 'deles af ' + ids.map(pName).map(esc).join(', ');
   }
   return 'deles af alle';
@@ -455,9 +461,9 @@ function moneyTab() {
       </div>` : '<div class="small muted" style="margin-top:6px">Ingen i den husstand har skrevet et telefonnummer.</div>'}
     </div>`;
   }).join('');
-  const coming = ps.filter(p => statusOf(p) !== 'no').length || ps.length;
+  const coming = ps.filter(p => statusOf(p) !== 'no' && !p.isChild).length || ps.length;
   return `<div class="card" data-t="summary"><h2>Regnskab</h2>
-    <div class="bigsum" style="margin-top:10px"><div><b class="mono" data-t="total">${formatKr(r.total)}</b><span>i alt</span></div><div><b>${r.units.length}</b><span>${hasHh ? 'husstande' : 'deltagere'}</span></div><div><b class="mono">${formatKr(Math.round(r.total / Math.max(1, coming)))}</b><span>gns. pr. person</span></div></div>
+    <div class="bigsum" style="margin-top:10px"><div><b class="mono" data-t="total">${formatKr(r.total)}</b><span>i alt</span></div><div><b>${r.units.length}</b><span>${hasHh ? 'husstande' : 'deltagere'}</span></div><div><b class="mono">${formatKr(Math.round(r.total / Math.max(1, coming)))}</b><span>gns. pr. voksen</span></div></div>
   </div>
   <div class="card"><h2>Hvem skylder hvem</h2>
     ${hasHh ? '<p class="small muted" style="margin:4px 0 8px">Samlet pr. husstand – én overførsel pr. husstand.</p>' : ''}
@@ -467,7 +473,7 @@ function moneyTab() {
     <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>${hasHh ? 'Husstand' : 'Navn'}</th><th>Betalt</th><th>Andel</th><th>Saldo</th></tr></thead><tbody>
     ${r.units.map(u => { const b = r.balance[u.id], l = unitLabel(u); return `<tr data-t="unit-row" data-unit="${esc(u.id)}"><td>${esc(l.name)}${u.id === meUnit ? ' <span class="tag">dig</span>' : ''}${u.household ? `<div class="small muted">${u.members.length} pers.</div>` : ''}</td><td>${formatKr(r.paid[u.id])}</td><td>${formatKr(r.share[u.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
     </tbody></table>
-    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ er pr. person (børn tæller med), men ikke dem, der har meldt „Kommer ikke“. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
+    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ og „udvalgte“ er pr. voksen: børn og dem, der har meldt „Kommer ikke“, betaler ikke med. „Pr. husstand“ er lige meget pr. husstand, uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
   </div>
   <div class="card"><h2>Udgifter</h2><ul class="items" style="padding:0;margin-top:6px">
     ${costItems.map(i => `<li class="item"><span class="it-ic">${(ITEM_KINDS[i.kind] || ITEM_KINDS.ret)[0]}</span><div class="grow"><div class="t">${esc(i.title)}</div>
@@ -519,8 +525,10 @@ function helpSheet() {
       <li><b>Gæsterne tilmelder sig</b> med navn og telefonnummer og skriver på, hvad de tager med – hvor mange det rækker til, en note og evt. hvad det kostede.</li>
       <li><b>Kommer du?</b> Tryk ✅ Kommer, 🤔 Måske eller ❌ Kommer ikke. Under 👥 Gæster ses hvor mange voksne og børn der kommer.</li>
       <li><b>Husstand:</b> Kommer du med partner, børn eller søskende, så tryk „🏠 Kommer du med nogen?“ og opret en husstand (fx „Familien Hansen“). Skriv dem på, selvom de ikke selv har appen – med navn, evt. telefon, og om det er et barn. Er din familie allerede skrevet på, så tryk „Tilføj mig“ ved deres husstand.</li>
-      <li><b>„Det er mig“:</b> Har en anden skrevet dig på, så åbn linket og tryk „Det er mig“ ved dit navn. Så overtager du pladsen, og det der står på dig følger med.</li>
-      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle (pr. person – børn tæller med, men ikke dem der har meldt fra), pr. husstand (lige meget hver) eller mellem udvalgte. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
+      <li><b>„Det er mig“:</b> Har en anden skrevet dig på, så åbn linket og tryk „Det er mig“ ved dit navn – det gælder også børn. Så overtager du pladsen, og det der står på dig følger med.</li>
+      <li><b>Er du barn?</b> Sæt flueben ved „Jeg er barn“, når du tilmelder dig. Så behøver du ikke skrive telefonnummer, og du betaler ikke med, når en udgift deles pr. person.</li>
+      <li><b>Ret din tilmelding</b> (navn, telefon, barn, om du kommer) under ⚙️ → „Ret min tilmelding“, eller tryk på dit navn på gæstelisten.</li>
+      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle voksne (pr. person), pr. husstand (lige meget hver) eller mellem udvalgte voksne. <b>Børn betaler ikke med</b>, når der deles pr. person, og heller ikke dem, der har meldt „Kommer ikke“. Deles der pr. husstand, betaler husstanden det samme uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
       <li><b>Betal med MobilePay:</b> Ved hver gæld står modtagerens nummer og beløbet, med knapper til at kopiere og til at forsøge at åbne MobilePay.</li>
     </ol>
     <h3>Godt at vide</h3>
@@ -574,7 +582,7 @@ function itemSheet(it, eventId = '', kind = 'ret') {
   const isExpense = kind === 'udgift';
   const ev = S.events.find(e => e.id === (it?.eventId ?? eventId));
   const split = it?.split || 'all';
-  const among = new Set(it?.split === 'selected' && it.among?.length ? it.among : S.participants.filter(p => statusOf(p) !== 'no').map(p => p.id));
+  const among = new Set(it?.split === 'selected' && it.among?.length ? it.among : S.participants.filter(p => statusOf(p) !== 'no' && !p.isChild).map(p => p.id));
   const units = unitsOf(sortedPeople(), S.households);
   const amongU = new Set(it?.split === 'households' && it.among?.length ? it.among : units.filter(u => u.members.some(p => statusOf(p) !== 'no')).map(u => u.id));
   // Hvem tager det med / har betalt? Mig eller en i min husstand uden egen bruger.
@@ -595,7 +603,8 @@ function itemSheet(it, eventId = '', kind = 'ret') {
       <input type="hidden" name="split" value="${split}">
       <p class="small muted split-help" style="margin:6px 0 0">${SPLIT_HELP[split]}</p>
       <div class="checks" id="among" style="${split === 'selected' ? '' : 'display:none'}">
-        ${sortedPeople().map(p => `<label><input type="checkbox" name="among" value="${p.id}" ${among.has(p.id) ? 'checked' : ''}> ${esc(p.name)}${p.isChild ? ' <span class="tag kid">barn</span>' : ''}${statusOf(p) === 'no' ? ' <span class="small muted">(kommer ikke)</span>' : ''}</label>`).join('')}
+        ${sortedPeople().filter(p => !p.isChild).map(p => `<label><input type="checkbox" name="among" value="${p.id}" ${among.has(p.id) ? 'checked' : ''}> ${esc(p.name)}${statusOf(p) === 'no' ? ' <span class="small muted">(kommer ikke)</span>' : ''}</label>`).join('')}
+        ${S.participants.some(p => p.isChild) ? '<p class="small muted" style="margin:2px 4px">Børn er ikke med på listen – de betaler ikke med ved deling pr. person.</p>' : ''}
       </div>
       <div class="checks" id="among-hh" style="${split === 'households' ? '' : 'display:none'}">
         ${units.map(u => `<label><input type="checkbox" name="amongHh" value="${esc(u.id)}" ${amongU.has(u.id) ? 'checked' : ''}> ${u.household ? '🏠 ' : ''}${esc(unitLabel(u).name)} <span class="small muted">(${u.members.length} pers.)</span></label>`).join('')}
@@ -611,9 +620,9 @@ function itemSheet(it, eventId = '', kind = 'ret') {
 }
 
 const SPLIT_HELP = {
-  all: 'Deles lige pr. person mellem alle, der kommer (børn tæller som en person). Dem, der har meldt „Kommer ikke“, er ikke med.',
-  households: 'Hver husstand betaler lige meget, uanset hvor mange de er. Enlige tæller som en husstand.',
-  selected: 'Deles lige pr. person mellem dem, du vælger.',
+  all: 'Deles lige mellem de voksne, der kommer. Børn og dem, der har meldt „Kommer ikke“, betaler ikke med.',
+  households: 'Hver husstand betaler lige meget, uanset hvor mange de er, og uanset antal børn. Enlige tæller som en husstand.',
+  selected: 'Deles lige mellem de voksne, du vælger. Børn betaler ikke med.',
 };
 
 // ── Husstande: ark ───────────────────────────────────────────────────────
@@ -643,7 +652,7 @@ function personSheet(hid, p) {
     ${!p ? '<p class="small muted" style="margin:0">Til personer der ikke selv har appen – fx partner, børn eller søskende. Har de selv en telefon, kan de senere åbne linket og trykke „Det er mig“.</p>' : ''}
     <label class="f"><span>Navn *</span><input type="text" name="name" maxlength="60" required value="${esc(p?.name || '')}" placeholder="F.eks. Sofie"></label>
     <label class="f"><span>Telefonnummer (valgfrit)</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(p?.phone || '')}" placeholder="12 34 56 78"></label>
-    ${canChild ? `<div class="checks" style="max-height:none"><label><input type="checkbox" name="isChild" data-t="is-child" ${p?.isChild ? 'checked' : ''}> 🧒 Barn</label></div>` : ''}
+    ${canChild ? childBox('Barn', !!p?.isChild) : ''}
     <label class="f"><span>Kommer ${p ? esc(firstName(p.name)) : 'personen'}?</span></label>
     <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="person-status-${k}">${ic} ${l}</button>`).join('')}</div>
     <input type="hidden" name="status" value="${st}">
@@ -658,10 +667,11 @@ function claimSheet(p) {
   openSheet(`Er du ${p.name}?`, `<form id="claim-form" data-id="${p.id}" autocomplete="on">
     <p class="small muted" style="margin:0">Så overtager du pladsen${hh ? ` i <b>${esc(hh.name)}</b>` : ''}. Alt der allerede står på ${esc(firstName(p.name))}, følger med. Skriv dit nummer, så de andre kan betale dig via MobilePay.</p>
     <label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required autocomplete="name" value="${esc(p.name)}"></label>
-    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required autocomplete="tel" inputmode="tel" value="${esc(p.phone || prof.phone || '')}" placeholder="12 34 56 78"></label>
+    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" autocomplete="tel" inputmode="tel" value="${esc(p.phone || (p.isChild ? '' : prof.phone) || '')}" placeholder="12 34 56 78"></label>
     <label class="f"><span>Kommer du?</span></label>
     <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${statusOf(p) === k ? 'on' : ''}">${ic} ${l}</button>`).join('')}</div>
     <input type="hidden" name="status" value="${statusOf(p)}">
+    ${childBox('Jeg er barn', !!p.isChild, 'claim-child-box')}
     <div class="err"></div><div class="actions"><button class="btn green" data-t="claim-save">✋ Ja, det er mig</button></div></form>`);
 }
 
@@ -669,17 +679,24 @@ function meSheet(edit) {
   const m = me();
   const others = S.participants.filter(p => p.ownerUid === store.uid && p.id !== m?.id);
   if (edit) {
-    openSheet('Mine oplysninger', `<form id="me-form"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required value="${esc(m.name)}"></label>
-      <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required inputmode="tel" value="${esc(m.phone)}"></label><div class="err"></div>
-      <div class="actions"><button class="btn primary">Gem</button></div></form>`);
+    const st = statusOf(m);
+    openSheet('Ret min tilmelding', `<form id="me-form" autocomplete="on"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required value="${esc(m.name)}"></label>
+      <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(m.phone)}" placeholder="12 34 56 78"></label>
+      ${childBox('Jeg er barn', !!m.isChild, 'me-child')}
+      ${hhOn() ? `<label class="f"><span>Kommer du?</span></label>
+      <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="me-status-${k}">${ic} ${l}</button>`).join('')}</div>
+      <input type="hidden" name="status" value="${st}">` : ''}
+      <div class="err"></div>
+      <div class="actions"><button class="btn primary" data-t="save-me">💾 Gem min tilmelding</button></div></form>`);
     return;
   }
   openSheet('Er du ikke ' + m.name + '?', `
     ${others.length ? `<p class="muted small">Personer tilmeldt fra denne telefon:</p><div class="chips">${others.map(p => `<button class="chip solid" data-act="be" data-id="${p.id}">Jeg er ${esc(p.name)}</button>`).join('')}</div>` : ''}
-    ${claimableAdults().length ? `<p class="muted small" style="margin-top:14px">Skrevet på af andre (uden egen bruger):</p><div class="chips">${claimableAdults().map(p => `<button class="chip" data-act="claim" data-id="${p.id}">Det er mig: ${esc(p.name)}</button>`).join('')}</div>` : ''}
+    ${claimablePeople().length ? `<p class="muted small" style="margin-top:14px">Skrevet på af andre (uden egen bruger):</p><div class="chips">${claimablePeople().map(p => `<button class="chip" data-act="claim" data-id="${p.id}">Det er mig: ${esc(p.name)}${p.isChild ? ' (barn)' : ''}</button>`).join('')}</div>` : ''}
     <p class="muted small" style="margin-top:14px">Er du en ny gæst på denne telefon, så tilmeld dig her:</p>
     <form id="switch-form"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required></label>
-    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required inputmode="tel"></label><div class="err"></div>
+    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" inputmode="tel"></label>
+    ${childBox('Jeg er barn', false, 'switch-child')}<div class="err"></div>
     <div class="actions"><button class="btn primary" data-t="switch-join">Tilmeld ny person</button></div></form>
     <div class="actions"><button class="btn ghost" data-act="be" data-id="">Bare kig med (ikke tilmeldt)</button></div>`);
 }
@@ -762,9 +779,10 @@ function homeSettingsHtml() {
 
 function partySettingsHtml() {
   const m = me(), token = S.admin && store.creatorToken(S.pid);
-  const you = m ? `<div class="me" style="margin:6px 0 0">${avatar(m)}<div class="grow"><b>${esc(m.name)}</b><div class="small muted">${esc(prettyPhone(m.phone))}</div></div></div>
-      <div class="row-actions">${m.ownerUid === store.uid ? '<button class="btn sm" data-act="edit-me">✏️ Ret navn og telefon</button>' : ''}
-      <button class="btn sm ghost" data-act="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div>`
+  const st = statusOf(m);
+  const you = m ? `<div class="me" style="margin:6px 0 0">${avatar(m)}<div class="grow"><b>${esc(m.name)}</b>${m.isChild ? ' <span class="tag kid">barn</span>' : ''}<div class="small muted">${m.phone ? esc(prettyPhone(m.phone)) : 'Intet nummer'}${hhOn() ? ` · ${STATUS[st][0]} ${STATUS[st][1]}` : ''}</div></div></div>
+      ${m.ownerUid === store.uid ? '<button class="btn primary block" style="margin-top:10px" data-act="edit-me" data-t="settings-edit-me">✏️ Ret min tilmelding</button><p class="small muted" style="margin:6px 0 0">Navn, telefon, om du er barn, og om du kommer.</p>' : ''}
+      <div class="row-actions"><button class="btn sm ghost" data-act="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div>`
     : `<p class="small muted">Du er ikke tilmeldt dette gilde endnu.</p><button class="btn sm primary" data-act="close-sheet">Tilmeld mig</button>`;
   return `<section class="set"><h3>👤 Dig i dette gilde</h3>${you}</section>
     <section class="set" data-t="notif-section"><h3>🔔 Notifikationer</h3>${notifHtml()}</section>
@@ -867,8 +885,10 @@ function syncSubParticipant() {
 // ───────────────────────────── Handlinger ─────────────────────────────
 function readPerson(form) {
   const name = form.name.value.trim(), phone = cleanPhone(form.phone.value);
+  const child = !!form.isChild?.checked;
   if (!name) return { err: 'Skriv dit navn.' };
-  if (!isValidPhone(phone)) return { err: 'Skriv et gyldigt telefonnummer (8 cifre).' };
+  if (child && !phone) return { name, phone: '' };             // børn behøver ikke telefonnummer
+  if (!isValidPhone(phone)) return { err: child ? 'Telefonnummeret ser forkert ud (8 cifre) – eller lad feltet stå tomt.' : 'Skriv et gyldigt telefonnummer (8 cifre).' };
   return { name, phone };
 }
 async function register(form) {
@@ -877,9 +897,10 @@ async function register(form) {
   if (p.err) { errEl.textContent = p.err; return; }
   const btn = $('button:not([type=button])', form); btn.disabled = true;
   try {
-    const id = await store.add(S.pid, 'participants', { name: p.name, phone: p.phone });
-    LS.set(meKey(S.pid), id); LS.set('sg:profile', { name: p.name, phone: p.phone });
-    store.logActivity(S.pid, 'guest', `${p.name} er tilmeldt`, { participantId: id });
+    const child = !!form.isChild?.checked;
+    const id = await store.add(S.pid, 'participants', { name: p.name, phone: p.phone, ...(child ? { isChild: true } : {}) });
+    LS.set(meKey(S.pid), id); if (!child) LS.set('sg:profile', { name: p.name, phone: p.phone });
+    store.logActivity(S.pid, 'guest', `${p.name} er tilmeldt${child ? ' (barn)' : ''}`, { participantId: id });
     syncSubParticipant();
     closeSheet(); toast(`Velkommen, ${p.name}! 🎉`); render();
   } catch (e) { btn.disabled = false; fail(e); }
@@ -1103,8 +1124,9 @@ async function onSubmit(e) {
     const p = pById(f.dataset.id); if (!p || !unclaimed(p)) return err('Personen er allerede overtaget af en anden.');
     const pr = readPerson(f); if (pr.err) return err(pr.err);
     return busy(async () => {
-      await store.claim(S.pid, p, { ...pr, status: f.status.value });
-      LS.set(meKey(S.pid), p.id); LS.set('sg:profile', pr);
+      const isChild = !!f.isChild?.checked;
+      await store.claim(S.pid, p, { ...pr, status: f.status.value, isChild });
+      LS.set(meKey(S.pid), p.id); if (!isChild) LS.set('sg:profile', pr);
       const hh = hhOfP(p);
       store.logActivity(S.pid, 'guest', `${pr.name} er tilmeldt${hh ? ' (' + hh.name + ')' : ''}${f.status.value !== 'yes' ? ' – ' + STATUS[f.status.value][2] : ''}`, { participantId: p.id });
       syncSubParticipant();
@@ -1117,7 +1139,16 @@ async function onSubmit(e) {
   }
   if (f.id === 'me-form') {
     const p = readPerson(f); if (p.err) return err(p.err);
-    return busy(async () => { await store.update(S.pid, 'participants', myId(), p); LS.set('sg:profile', p); closeSheet(); toast('Gemt'); });
+    const m = me(); if (!m) return err('Du er ikke tilmeldt.');
+    const isChild = !!f.isChild?.checked, status = f.status ? f.status.value : statusOf(m);
+    const upd = { ...p, isChild, ...(f.status ? { status } : {}) };
+    return busy(async () => {
+      await store.update(S.pid, 'participants', m.id, upd);
+      if (!isChild) LS.set('sg:profile', p);
+      if (statusOf(m) !== status) store.logActivity(S.pid, 'guest', statusText(p.name, status), { participantId: m.id });
+      closeSheet(); toast('Din tilmelding er gemt ✓', 3500);
+      if ($('#settings-body')) renderSettings();
+    });
   }
   if (f.id === 'party-form') {
     const name = f.name.value.trim(); if (!name) return err('Giv gildet et navn.');
@@ -1158,7 +1189,7 @@ async function onSubmit(e) {
       if (cost && !on.length) return err('Vælg mindst én husstand.');
       among = on.length === boxes.length ? [] : on;   // alle valgt = alle husstande (også nye)
     }
-    if (cost && split === 'selected' && !among.length) return err('Vælg mindst én person.');
+    if (cost && split === 'selected' && !among.length) return err('Vælg mindst én voksen – børn betaler ikke med ved deling pr. person.');
     const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost ? among : [] };
     return busy(async () => {
       const who = (f.who && f.who.value !== myId() ? pName(f.who.value) : me()?.name) || 'Nogen';

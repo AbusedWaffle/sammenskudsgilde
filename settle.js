@@ -68,9 +68,12 @@ export function headcount(participants) {
  * Beregn regnskab – samlet pr. husstand.
  * @param participants [{id, name, householdId?, isChild?, status?}] – rækkefølgen bestemmer hvem der får ekstra øre
  * @param costs [{payer (deltager-id), amount (øre), split: 'all'|'selected'|'households', among: [ids]}]
- *   'all'        – deles pr. person mellem alle, der ikke har meldt "Kommer ikke" (børn tæller som en person)
- *   'selected'   – deles pr. person mellem de valgte deltagere (among = deltager-id'er)
- *   'households' – lige stor andel pr. husstand; among = husstands-/enheds-id'er (tom = alle husstande med nogen der kommer)
+ *   'all'        – deles pr. person mellem de voksne, der ikke har meldt "Kommer ikke". Børn betaler ikke med.
+ *   'selected'   – deles pr. person mellem de valgte voksne (among = deltager-id'er; børn i listen ignoreres).
+ *                  Er der KUN valgt børn (gamle poster), deles beløbet mellem de voksne i børnenes husstande;
+ *                  har de ingen voksne, deles det som 'all'.
+ *   'households' – lige stor andel pr. husstand, uanset antal børn; among = husstands-/enheds-id'er (tom = alle husstande med nogen der kommer)
+ * Et barn, der har lagt ud, får stadig pengene tilbage (betaling tæller altid).
  * @param households [{id, name}] – husstands-dokumenter (valgfri; uden dem er alle deres egen husstand)
  * @returns {units, unitOf, paid, share, balance, total, entries, transfers} – nøgler er enheds-id'er.
  *   Uden husstande er enheds-id = deltager-id, så resultatet er det samme som et pr.-person-regnskab.
@@ -83,7 +86,13 @@ export function settle(participants, costs, households = []) {
   const uids = units.map(u => u.id);
   const pids = participants.map(p => p.id);
   const known = new Set(pids);
+  const byId = new Map(participants.map(p => [p.id, p]));
+  const adult = id => !byId.get(id)?.isChild;
   const coming = participants.filter(p => statusOf(p) !== 'no').map(p => p.id);
+  const comingAdults = coming.filter(adult);
+  const adults = pids.filter(adult);
+  // Hvem deler "alle – pr. person"? Voksne der kommer; ellers alle voksne; ellers (kun børn) dem der kommer; ellers alle.
+  const allPeople = comingAdults.length ? comingAdults : adults.length ? adults : coming.length ? coming : pids.slice();
   const paid = {}, share = {};
   for (const id of uids) { paid[id] = 0; share[id] = 0; }
   let total = 0;
@@ -91,7 +100,6 @@ export function settle(participants, costs, households = []) {
   for (const c of costs) {
     const amount = Math.round(c.amount || 0);
     if (!(amount > 0) || !known.has(c.payer)) continue;
-    const allPeople = coming.length ? coming : pids.slice();
     let perUnit;
     let among;
     if (c.split === 'households') {
@@ -100,8 +108,16 @@ export function settle(participants, costs, households = []) {
       if (!among.length) among = uids.slice();
       perUnit = splitAmount(amount, among);
     } else {
-      among = c.split === 'selected' && Array.isArray(c.among) ? pids.filter(id => c.among.includes(id)) : allPeople;
-      if (!among.length) among = allPeople;   // alle valgte er fjernet → fordel på alle der kommer
+      among = allPeople;
+      if (c.split === 'selected' && Array.isArray(c.among)) {
+        const sel = pids.filter(id => c.among.includes(id));
+        among = sel.filter(adult);
+        if (!among.length && sel.length) {         // kun børn valgt → de voksne i børnenes husstande
+          const hs = new Set(sel.map(id => unitOf[id]));
+          among = adults.filter(id => hs.has(unitOf[id]));
+        }
+        if (!among.length) among = allPeople;      // alle valgte er fjernet → som "alle"
+      }
       const parts = splitAmount(amount, among);
       perUnit = {};
       for (const id in parts) perUnit[unitOf[id]] = (perUnit[unitOf[id]] || 0) + parts[id];
