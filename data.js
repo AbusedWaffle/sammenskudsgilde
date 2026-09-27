@@ -8,13 +8,19 @@
 //   parties/{partyId}                     navn, dato, tid, sted, note, creatorUid, creatorHash
 //   parties/{partyId}/events/{id}         programpunkt/ret: title, time, kind, order
 //   parties/{partyId}/participants/{id}   name, phone, ownerUid ('' = uden egen bruger), householdId, isChild,
-//                                         status ('yes'|'maybe'|'no', mangler = 'yes'), addedByUid
+//                                         status ('yes'|'maybe'|'no', mangler = 'yes'), addedByUid,
+//                                         diet [vegetar|vegansk|glutenfri|laktosefri|noedder], dietNote
 //   parties/{partyId}/households/{id}     name, memberUids [uid'er med bruger i husstanden], createdByUid
 //   parties/{partyId}/items/{id}          eventId, participantId, ownerUid, title, kind, servings, note,
 //                                         cost (øre), split ('all'|'selected'|'households'|'none' = deles ikke),
-//                                         among [participantIds] eller [husstands-/enheds-id'er] ved 'households'
+//                                         among [participantIds] eller [husstands-/enheds-id'er] ved 'households',
+//                                         tags [vegetar|vegansk|noedder|gluten|laktose|koed], suggestionId
+//   parties/{partyId}/suggestions/{id}    forslag: title, eventId, note, ownerUid, byPid,
+//                                         takenByUid, takenByPid, takenItemId, takenAt ('' = ledig)
+//   parties/{partyId}/payments/{id}       betaling: fromUnit, toUnit (husstands-/enheds-id), fromPid, toPid, amount (øre),
+//                                         status ('marked'|'confirmed'), ownerUid, confirmedByUid, confirmedAt
 //   parties/{partyId}/claims/{uid}        { key } – bevis for opretter-nøgle (kan ikke læses af nogen)
-//   parties/{partyId}/activity/{id}       type, text, actorUid, participantId, hasCost, createdAt – til notifikationer
+//   parties/{partyId}/activity/{id}       type, text, actorUid, participantId, hasCost, targetPids, createdAt – til notifikationer
 //   parties/{partyId}/subs/{uid}          notifikations-indstillinger pr. enhed (kun ejeren kan læse/skrive):
 //                                         enabled, participantId, channels.push{endpoint,keys}, topics{…},
 //                                         frequency, digestHour, reminderBefore, tz, baselineAt, testRequestedAt,
@@ -33,7 +39,7 @@ export function chooseBackend() {
   return { kind: 'mock', reason: 'unconfigured' };
 }
 
-const SUBS = ['events', 'participants', 'items', 'households'];
+const SUBS = ['events', 'participants', 'items', 'households', 'suggestions', 'payments'];
 
 // ───────────────────────────── Firebase / emulator ─────────────────────────────
 async function firebaseBackend(kind) {
@@ -198,7 +204,7 @@ export async function createStore() {
     },
     updateParty: (pid, fields) => b.update(['parties', pid], { ...fields, updatedAt: b.ts() }),
     async deleteParty(pid, lists) {
-      for (const sub of SUBS) for (const d of lists[sub] || []) await b.remove(['parties', pid, sub, d.id]);
+      for (const sub of SUBS) for (const d of lists[sub] || []) await b.remove(['parties', pid, sub, d.id]).catch(e => { if (sub === 'suggestions' || sub === 'payments') return; throw e; });
       for (const d of await b.list(['parties', pid, 'activity']).catch(() => [])) await b.remove(['parties', pid, 'activity', d.id]);
       await b.remove(['parties', pid, 'subs', b.uid]).catch(() => {});
       await b.remove(['parties', pid]);
@@ -242,9 +248,10 @@ export async function createStore() {
     ]),
     renameHousehold: (pid, hid, name) => b.update(['parties', pid, 'households', hid], { name }),
     /** Tilføj en person uden egen bruger (barn, partner …) til husstanden. */
-    async addMember(pid, hid, { name, phone = '', isChild = false, status = 'yes' }) {
+    async addMember(pid, hid, { name, phone = '', isChild = false, status = 'yes', diet = [], dietNote = '' }) {
       const id = randomId(20);
-      await b.set(['parties', pid, 'participants', id], { name, phone, isChild, status, householdId: hid, ownerUid: '', addedByUid: b.uid, createdAt: b.ts() });
+      await b.set(['parties', pid, 'participants', id], { name, phone, isChild, status, householdId: hid, ownerUid: '', addedByUid: b.uid, createdAt: b.ts(),
+        ...(diet.length ? { diet } : {}), ...(dietNote ? { dietNote } : {}) });
       return id;
     },
     /** "Det er mig": overtag en person uden bruger. Samme ID, så retter og udgifter følger med. */
@@ -254,11 +261,82 @@ export async function createStore() {
         ...(typeof isChild === 'boolean' && isChild !== !!person.isChild ? { isChild } : {}) } },   // kun sendt ved ændring
     ]),
 
-    /** Aktivitetslog til notifikationer. Fejl her må aldrig stoppe selve handlingen. */
+    /** Aktivitetslog til notifikationer. Fejl her må aldrig stoppe selve handlingen (undtagen med {strict:true}). */
     logActivity(pid, type, text, extra = {}) {
-      return b.set(['parties', pid, 'activity', randomId(20)], { type, text: String(text).slice(0, 200), actorUid: b.uid,
-        participantId: extra.participantId || '', ...(extra.hasCost ? { hasCost: true } : {}), createdAt: b.ts() })
-        .catch(e => console.warn('aktivitet ikke logget', e));
+      const w = b.set(['parties', pid, 'activity', randomId(20)], { type, text: String(text).slice(0, 200), actorUid: b.uid,
+        participantId: extra.participantId || '', ...(extra.hasCost ? { hasCost: true } : {}),
+        ...(extra.targetPids?.length ? { targetPids: extra.targetPids.slice(0, 50) } : {}), createdAt: b.ts() });
+      return extra.strict ? w : w.catch(e => console.warn('aktivitet ikke logget', e));
+    },
+
+    // ── Forslag ("Det mangler vi") ──────────────────────────────────────────
+    /** "Jeg tager den": opret retten og marker forslaget som taget i én batch (reglerne kræver det). */
+    async takeSuggestion(pid, sid, item, myPid) {
+      const iid = randomId(20);
+      await b.batch([
+        { op: 'set', path: ['parties', pid, 'items', iid], data: { ...item, suggestionId: sid, ownerUid: b.uid, createdAt: b.ts() } },
+        { op: 'update', path: ['parties', pid, 'suggestions', sid], data: { takenByUid: b.uid, takenByPid: myPid || '', takenItemId: iid, takenAt: b.ts() } },
+      ]);
+      return iid;
+    },
+    /** "Fortryd": slet retten (hvis den findes) og sæt forslaget tilbage som ledigt. */
+    untakeSuggestion: (pid, sid, iid) => b.batch([
+      ...(iid ? [{ op: 'remove', path: ['parties', pid, 'items', iid] }] : []),
+      { op: 'update', path: ['parties', pid, 'suggestions', sid], data: { takenByUid: '', takenByPid: '', takenItemId: '', takenAt: '' } },
+    ]),
+
+    // ── Betalinger ──────────────────────────────────────────────────────────
+    /** Registrér en betaling. confirmed=true: modtageren registrerer "Modtaget" direkte. */
+    async addPayment(pid, { fromUnit, toUnit, fromPid, toPid, amount }, confirmed = false) {
+      const id = randomId(20);
+      await b.set(['parties', pid, 'payments', id], { fromUnit, toUnit, fromPid: fromPid || '', toPid: toPid || '', amount,
+        status: confirmed ? 'confirmed' : 'marked', ownerUid: b.uid, createdAt: b.ts(),
+        ...(confirmed ? { confirmedByUid: b.uid, confirmedAt: b.ts() } : {}) });
+      return id;
+    },
+    confirmPayment: (pid, id) => b.update(['parties', pid, 'payments', id], { status: 'confirmed', confirmedByUid: b.uid, confirmedAt: b.ts() }),
+
+    // ── Genbrug en fest ─────────────────────────────────────────────────────
+    /**
+     * Opret et nyt gilde som kopi af et andet (kun værten). Kopierer programpunkter/retter, husstande og personer
+     * uden egen bruger (+ evt. pladsholdere for gæster med egen bruger og værtens egen tilmelding) – ikke retter,
+     * udgifter, betalinger, forslag eller svar (kopierede personer står som "kommer måske").
+     * @param src {events, households, participants} fra det gamle gilde
+     * @param opts {fields: {name,date,time,place,note}, events: bool, households: bool, placeholders: bool, me: participant|null}
+     * @returns {id, token, myPid}
+     */
+    async copyParty(src, opts) {
+      const { id: pid, token } = await store.createParty(opts.fields);
+      const P = sub => ['parties', pid, sub, randomId(20)];
+      // Grupper i små batches: reglerne må kun slå et begrænset antal dokumenter op pr. batch
+      // (hver husstand + dens personer i sin egen batch).
+      const groups = [];
+      if (opts.events && src.events.length) groups.push(src.events.map(e => ({ op: 'set', path: P('events'), data: { title: e.title, kind: e.kind || 'ret', time: e.time || '', order: e.order ?? 0, ownerUid: b.uid, createdAt: b.ts() } })));
+      const me = opts.me, hhMap = {}, others = [];
+      const copyPeople = opts.households || opts.placeholders;
+      const wanted = p => p.id === me?.id || (!p.ownerUid && opts.households) || (p.ownerUid && opts.placeholders);
+      const person = (p, extra) => ({ name: p.name, phone: extra.ownerUid || !p.ownerUid ? (p.phone || '') : '',
+        ...(p.isChild ? { isChild: true } : {}), ...(p.diet?.length ? { diet: p.diet } : {}), ...(p.dietNote ? { dietNote: p.dietNote } : {}),
+        householdId: hhMap[p.householdId] || '', createdAt: b.ts(), ...extra });
+      const personOp = p => ({ op: 'set', path: p.id === me?.id ? (myPath = P('participants')) : P('participants'),
+        data: person(p, p.id === me?.id ? { ownerUid: b.uid } : { ownerUid: '', addedByUid: b.uid, status: 'maybe' }) });
+      let myPath = null;
+      const done = new Set();
+      if (copyPeople || me) for (const h of src.households) {
+        const members = src.participants.filter(p => p.householdId === h.id && (copyPeople ? wanted(p) : p.id === me?.id));
+        if (!members.length) continue;
+        const path = P('households'); hhMap[h.id] = path[3];
+        if (!members.some(p => p.id === me?.id)) others.push(path[3]);   // værten er ikke selv med → fjernes bagefter
+        groups.push([{ op: 'set', path, data: { name: h.name, memberUids: [b.uid], createdByUid: b.uid, createdAt: b.ts() } },
+          ...members.map(p => { done.add(p.id); return personOp(p); })]);
+      }
+      const loose = src.participants.filter(p => !done.has(p.id) && (p.id === me?.id || (copyPeople && wanted(p))));
+      for (let i = 0; i < loose.length; i += 50) groups.push(loose.slice(i, i + 50).map(personOp));
+      for (const g of groups) for (let i = 0; i < g.length; i += 400) await b.batch(g.slice(i, i + 400));
+      if (others.length) for (const hid of others) await b.update(['parties', pid, 'households', hid], { memberUids: [] });
+      const myPid = myPath ? myPath[3] : null;
+      const people = groups.flat().filter(o => o.path[2] === 'participants' && !o.data.ownerUid).length;
+      return { id: pid, token, myPid, counts: { events: opts.events ? src.events.length : 0, households: Object.keys(hhMap).length, people } };
     },
     // Notifikations-abonnement for denne enhed i dette gilde
     getSub: pid => b.get(['parties', pid, 'subs', b.uid]),

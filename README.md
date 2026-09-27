@@ -22,7 +22,13 @@ Tip: Tryk på del-knappen i browseren og vælg **Føj til hjemmeskærm**, så li
 5. **Er du barn?** Sæt flueben ved **Jeg er barn**, når du tilmelder dig. Så behøver du ikke skrive telefonnummer, og du betaler ikke med, når en udgift deles pr. person.
 
 ## Ret din tilmelding
-Tryk på tandhjulet **⚙️** → **Ret min tilmelding** (eller tryk på dit eget navn på gæstelisten). Her kan du rette navn, telefonnummer, om du er barn, og om du kommer. Tryk **Gem min tilmelding**, så står der "Din tilmelding er gemt ✓".
+Tryk på tandhjulet **⚙️** → **Ret min tilmelding** (eller tryk på dit eget navn på gæstelisten). Her kan du rette navn, telefonnummer, om du er barn, **kost og allergier**, og om du kommer. Tryk **Gem min tilmelding**, så står der "Din tilmelding er gemt ✓".
+
+## Allergier og kost 🥗
+- Når du tilmelder dig, kan du trykke **🥗 Allergier eller særlig kost?** og vælge **Vegetar**, **Vegansk**, **Glutenfri**, **Laktosefri** eller **Nøddeallergi** – og skrive andet i fritekst (fx "ingen svampe", "skaldyrsallergi"). Det kan også rettes bagefter under **⚙️ → Ret min tilmelding**.
+- Husstanden sætter kost og allergier for dem, der ikke selv har appen (fx børnene): tryk ✏️ ved personen under **👥 Gæster**.
+- Øverst på **👥 Gæster** står et overblik, fx **"3 vegetarer · 1 glutenfri · 1 nøddeallergi"**, og fritekst-noterne. Kun dem, der kommer eller måske kommer, tælles med. Programmet viser en kort **"🥗 Husk: …"**-linje.
+- Når du skriver en ret på, kan du mærke den: **Vegetar**, **Vegansk**, **Indeholder nødder**, **Indeholder gluten**, **Indeholder laktose** eller **Indeholder kød/fisk** (vegetarer advares om kød/fisk, veganere også om laktose). Passer en ret ikke til nogen, der kommer, står der en diskret advarsel ved retten, fx **"⚠️ Indeholder nødder – Sofie har nøddeallergi"**. Appen advarer kun ud fra mærkerne – står der ingen mærker på retten, ved appen ikke, hvad den indeholder.
 
 ## Kommer du? ✅ 🤔 ❌
 Øverst i gildet vælger du **Kommer**, **Måske** eller **Kommer ikke** (standard er Kommer). Du kan ændre det når som helst.
@@ -50,6 +56,14 @@ Fanen **👥 Gæster** er gæstelisten: øverst står, hvor mange **voksne og b�
 - Udgifter, der ikke hører til en ret (leje af lokale, vin, indkøb), tilføjes under fanen **💰 Regnskab** med **Tilføj en udgift**.
 - Alle kan se, hvad de andre tager med. Man kan rette og slette sine egne ting med ✏️.
 
+## Det mangler vi 💡 (forslag)
+- Mangler der noget – is, stole, isterninger, dessert? Tryk **+ Foreslå** i kortet **💡 Det mangler vi** øverst i programmet (eller **💡 Foreslå noget til …** under en ret). Skriv hvad, evt. hvilken ret det hører til og en note.
+- Alle kan trykke **✋ Jeg tager den** ved et forslag. Så åbnes en udfyldt formular, hvor du kan rette det til og evt. skrive pris og deling på (også **Ingen**). Når du gemmer, flytter det fra forslagene over til det, der bliver taget med – med dit navn, under den rigtige ret.
+- Fortryder du, tryk **↩︎ Fortryd** ved tingen: så bliver det et forslag igen. Sletter du tingen, bliver den også et forslag igen.
+- Opretteren af et forslag og værten kan slette det med 🗑️.
+- Er der en ret (forret, hovedret, dessert …), som ingen har meldt sig til endnu, står der et lille hint, fx **"Ingen har meldt dessert endnu"**.
+- Trykker to på samme tid, får den ene besked om, at "Nogen har lige taget den".
+
 ## Regnskab og MobilePay
 Fanen **💰 Regnskab** viser:
 - hvad der er brugt i alt,
@@ -60,8 +74,31 @@ Beløb regnes præcist til øren. Går et beløb ikke lige op, får de første t
 
 Ved hver gæld står, hvem i den modtagende husstand pengene skal til (den, der har lagt ud, eller en med telefonnummer), med **telefonnummer** og **beløbet** med knapperne **Kopiér nr.** og **Kopiér beløb**. Knappen **Åbn MobilePay** forsøger at åbne MobilePay med nummer og beløb udfyldt. MobilePay tilbyder ikke dette officielt, så sker der ikke noget, kopierer du bare nummer og beløb ind i MobilePay selv. Du kan også sende en SMS til modtageren.
 
+## Hvem har betalt ✅
+Under **Hvem skylder hvem** står status ved hver overførsel: **⏳ Mangler**, **🕓 Markeret betalt** eller **✔️ Bekræftet**.
+- **Den, der skylder** (eller en anden i samme husstand), trykker **✅ Jeg har betalt**, når pengene er sendt. Beløbet er udfyldt, men kan rettes, hvis man kun har betalt en del.
+- **Modtageren** (eller en anden i modtagerens husstand med egen bruger) og værten trykker **✔️ Modtaget**, når pengene er kommet – eller **Ikke modtaget**, så forsvinder markeringen, og beløbet mangler igen. Har man fået pengene kontant, kan modtageren trykke **💰 Modtaget** direkte.
+- En markeret betaling tæller med med det samme. Den, der har markeret, kan fortryde, indtil den er bekræftet.
+- **Betalinger gemmes for sig selv** (fra husstand til husstand med beløb) og trækkes fra i regnskabet. Ændres udgifterne bagefter, regnes "hvem skylder hvem" om ud fra det, der mangler – betalingen er ikke tabt. Har nogen betalt for meget, viser regnskabet det som penge, de skal have tilbage.
+- **Værten** får et **👑 Overblik for værten**: hvor mange der mangler, venter på bekræftelse og er bekræftet, og hvem der stadig skylder.
+- **🔔 Send påmindelse** (modtageren og værten): sender en notifikation til den, der skylder – kun hvis de har slået notifikationer og emnet **Betalinger** til. Appen husker, at du har sendt en påmindelse i dag.
+
+## Tilføj til kalender 📅
+Tryk **📅 Tilføj til kalender** øverst i gildet (når der er sat en dato).
+- **📥 Hent kalenderfil** henter en .ics-fil med titel, dato, tid, sted og link til gildet. **iPhone:** tryk **Tilføj alle**. **Android:** åbn den hentede fil med kalender-appen. Filen virker også i Outlook og Apple Kalender på computeren.
+- **🗓️ Åbn i Google Kalender** åbner Google Kalender med det hele udfyldt.
+- Uden tidspunkt bliver det en heldagsbegivenhed; med tidspunkt varer den 4 timer (ret det i kalenderen, hvis det passer bedre). Ændrer værten dato eller tid senere, skal du tilføje det igen.
+
+## Genbrug en fest ♻️
+Holder I den samme fest igen (julefrokost, sommerfest …)? Værten trykker **⚙️ → ♻️ Genbrug festen** (eller **♻️** i **✏️ Ret gildet**).
+- Skriv navn og dato på den nye fest. Sted, tidspunkt og besked er udfyldt fra den gamle.
+- Vælg hvad der skal med: **retter og programpunkter**, **husstande og personer uden egen bruger** (fx børn og partnere – de står som "🤔 Kommer måske", indtil de selv eller husstanden svarer, og kost/allergier følger med), og om du selv skal skrives på.
+- **Gæster med egen bruger** kan ikke tilmeldes af andre. Du kan vælge at skrive dem på som **pladsholdere** (kun navn, i deres husstand). Når de åbner det nye link, trykker de **Det er mig** ved deres navn og overtager pladsen – ellers tilmelder de sig bare selv.
+- **Kopieres ikke:** retter/bidrag, udgifter, betalinger, forslag og svar. Den gamle fest røres ikke.
+- Til sidst får du det nye link, som du sender til gæsterne.
+
 ## Notifikationer 🔔
-Du kan få besked på telefonen, når der sker noget i et gilde: nye gæster (også nye i en husstand, og når nogen melder til eller fra), nye retter og aktiviteter, ændringer i gildet eller programmet, nye udgifter og en påmindelse før festen.
+Du kan få besked på telefonen, når der sker noget i et gilde: nye gæster (også nye i en husstand, og når nogen melder til eller fra), nye retter og aktiviteter, nye forslag og når nogen tager et forslag, ændringer i gildet eller programmet, nye udgifter, **betalinger** (når nogen har betalt dig, bekræfter, eller sender en påmindelse om, at du mangler at betale) og en påmindelse før festen. Beskeder om betalinger går kun til dem, det handler om.
 
 **Sådan slår du det til:** Åbn gildet, tryk på tandhjulet **⚙️ Indstillinger** → **Slå notifikationer til**, og tryk **Tillad**, når telefonen spørger. Vælg derefter, hvad du vil have besked om, og hvor tit:
 - **Med det samme** – inden for ca. 15–30 minutter efter en ændring,
@@ -92,6 +129,8 @@ Under tandhjulet kan du også rette dit navn og telefonnummer, skifte person (**
 - **Værts-linket:** Som vært finder du under **🔗 Del** et hemmeligt **værts-link**. Gem det (fx i en note til dig selv). Med det kan du rette og slette gildet fra en anden telefon eller efter at have ryddet browseren. Send det ikke til gæsterne.
 - **Husstande er uden godkendelse.** Alle med linket kan melde sig ind i en husstand og så rette dens personer uden egen bruger, og kan trykke "Det er mig" ved en voksen uden bruger. Det er et bevidst valg til en venne-app; værten kan rette det tilbage.
 - **Værten kan rette og slette alt** i gildet, også andres ting, og kan slette hele gildet under **✏️ Ret gildet**. Det kan ikke fortrydes.
+- **Kost og allergier** kan ses af alle med linket – skriv kun det, du vil dele.
+- **Betalinger er tillid:** appen flytter ikke penge. "Jeg har betalt" er gæstens egen besked; modtageren bekræfter. Værten kan rette og slette betalinger.
 - Alt gemmes online og opdateres live for alle, også når appen er lukket. Det kræver internet.
 
 ## Teknik (kort)

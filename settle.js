@@ -77,11 +77,18 @@ export function headcount(participants) {
  *                  og ændrer ingens saldo; den returneres i `unshared` så den stadig kan vises.
  * Et barn, der har lagt ud, får stadig pengene tilbage (betaling tæller altid).
  * @param households [{id, name}] – husstands-dokumenter (valgfri; uden dem er alle deres egen husstand)
- * @returns {units, unitOf, paid, share, balance, total, entries, transfers, unshared, unsharedTotal} – nøgler er enheds-id'er.
+ * @param payments [{fromUnit, toUnit, fromPid?, toPid?, amount (øre), status: 'marked'|'confirmed'}] – registrerede betalinger
+ *   mellem husstande/enheder. Både "markeret betalt" og "bekræftet" tæller som betalt (modtageren kan afvise en
+ *   markering, så forsvinder den igen). Betalinger gemmes som selvstændige poster – ikke som "overførsel nr. 3" – så
+ *   de bevares, når udgifter ændres: resten beregnes altid som (udgifts-saldo + betalt − modtaget), og nye
+ *   overførsler findes ud fra resten. Enheden findes ud fra fromUnit/toUnit; findes den ikke længere (husstand
+ *   slettet/ændret), bruges den husstand, personen fromPid/toPid nu hører til.
+ * @returns {units, unitOf, paid, share, costBalance, sent, received, settled, balance, total, entries, transfers,
+ *   unshared, unsharedTotal} – nøgler er enheds-id'er. costBalance = saldo ud fra udgifter alene; balance = rest efter betalinger.
  *   Uden husstande er enheds-id = deltager-id, så resultatet er det samme som et pr.-person-regnskab.
  *   balance > 0: skal have penge; balance < 0: skylder.
  */
-export function settle(participants, costs, households = []) {
+export function settle(participants, costs, households = [], payments = []) {
   const units = unitsOf(participants, households);
   const unitOf = {};
   for (const u of units) for (const m of u.members) unitOf[m.id] = u.id;
@@ -133,9 +140,23 @@ export function settle(participants, costs, households = []) {
     total += amount;
     entries.push({ ...c, amount, among, parts: perUnit, payerUnit });
   }
+  const costBalance = {}, sent = {}, received = {};
+  for (const id of uids) { costBalance[id] = paid[id] - share[id]; sent[id] = 0; received[id] = 0; }
+  const uset = new Set(uids);
+  const resolve = (u, pid) => uset.has(u) ? u : (unitOf[u] || (pid && unitOf[pid]) || null);
+  const settled = [];
+  for (const pm of payments || []) {
+    const amount = Math.round(pm.amount || 0);
+    if (!(amount > 0)) continue;
+    const from = resolve(pm.fromUnit, pm.fromPid), to = resolve(pm.toUnit, pm.toPid);
+    if (!from || !to || from === to) continue;
+    sent[from] += amount; received[to] += amount;
+    settled.push({ ...pm, amount, from, to });
+  }
   const balance = {};
-  for (const id of uids) balance[id] = paid[id] - share[id];
-  return { units, unitOf, paid, share, balance, total, entries, transfers: minimalTransfers(balance, uids), unshared, unsharedTotal };
+  for (const id of uids) balance[id] = costBalance[id] + sent[id] - received[id];
+  return { units, unitOf, paid, share, costBalance, sent, received, settled, balance, total, entries,
+    transfers: minimalTransfers(balance, uids), unshared, unsharedTotal };
 }
 
 /**

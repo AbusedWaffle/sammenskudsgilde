@@ -2,8 +2,8 @@
 // Alle tider er millisekunder (UTC epoch). Tidszone for daglig opsamling og påmindelser: Europe/Copenhagen.
 
 export const TZ = 'Europe/Copenhagen';
-export const TOPICS = ['guests', 'items', 'party', 'costs', 'reminder'];
-export const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
+export const TOPICS = ['guests', 'items', 'party', 'costs', 'payments', 'reminder'];
+export const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, payments: true, reminder: true };
 export const REMINDER_MINUTES = { '1d': 24 * 60, '3h': 3 * 60 };
 const MAX_LINES = 4;
 
@@ -50,11 +50,14 @@ export function topicsOf(a) {
     case 'item': return a.hasCost ? ['items', 'costs'] : ['items'];
     case 'cost': return ['costs'];
     case 'party': return ['party'];
+    case 'payment': return ['payments'];        // betalinger: markeret betalt, bekræftet, påmindelser
     default: return [];
   }
 }
 export function wants(sub, a, subUid) {
   if (a.actorUid && a.actorUid === subUid) return false;                       // egen handling
+  // Målrettet besked (fx betalingspåmindelse): kun til de nævnte deltagere
+  if (Array.isArray(a.targetPids) && a.targetPids.length && !(sub.participantId && a.targetPids.includes(sub.participantId))) return false;
   if (a.participantId && sub.participantId && a.participantId === sub.participantId) return false;
   const topics = { ...DEFAULT_TOPICS, ...(sub.topics || {}) };
   return topicsOf(a).some(t => topics[t]);

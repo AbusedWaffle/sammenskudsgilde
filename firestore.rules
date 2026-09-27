@@ -37,9 +37,23 @@ rules_version = '2';
 //    bruger (også et barn). Det er et bevidst valg for en venne-app; værten kan rette alt tilbage.
 //  • Reglerne kan ikke garantere, at beløb er "rigtige" – kun at de er heltal i øre
 //    inden for et fornuftigt interval.
+//  • Betalinger: kun et medlem af den betalende husstand (eller værten) kan markere "betalt",
+//    og kun et medlem af den modtagende husstand (eller værten) kan bekræfte "modtaget".
+//    Betalingspåmindelser (activity med targetPids) kan skrives af alle med linket; appen viser
+//    kun knappen for modtageren og værten. Reglerne kan ikke hastighedsbegrænse påmindelser
+//    (appen husker "sendt i dag" lokalt), og de når kun frem til skyldnere, der selv har slået
+//    emnet "Betalinger" til. Da husstande er uden godkendelse, kan den, der melder sig ind i en
+//    husstand, også markere/bekræfte dens betalinger – værten kan slette forkerte betalinger.
 //  • Når et gilde slettes, sletter appen først under-dokumenterne. Efterladte
 //    claims-dokumenter (fra andre enheder) er ulæselige og harmløse; andres
 //    notifikations-abonnementer ryddes op af senderen (GitHub Actions).
+//
+//  v1.5
+//  • payments/{id}: registrerede betalinger mellem husstande/enheder (fromUnit → toUnit, beløb i øre,
+//    status 'marked' (markeret betalt) → 'confirmed' (modtaget)). Tæller som betalt i regnskabet.
+//  • suggestions/{id}: forslag ("Det mangler vi"). "Jeg tager den" = opret en ret + sæt takenItemId i
+//    samme batch; reglerne tjekker, at retten findes efter skrivningen og er ens egen.
+//  • Deltagere kan have diet (liste) og dietNote; retter kan have tags (liste) og suggestionId.
 //
 //  NOTIFIKATIONER
 //  • activity/{id}: en kort log ("Bo tager lasagne med"), som appen skriver ved hver
@@ -149,12 +163,15 @@ service cloud.firestore {
       // retter og udgifter følger med. Alle felter ud over name/phone/ownerUid er valgfri, så
       // deltagere oprettet af den tidligere version af appen stadig er gyldige.
       function validParticipant(d) {
-        return d.keys().hasOnly(['name', 'phone', 'ownerUid', 'createdAt', 'householdId', 'isChild', 'status', 'addedByUid'])
+        return d.keys().hasOnly(['name', 'phone', 'ownerUid', 'createdAt', 'householdId', 'isChild', 'status', 'addedByUid',
+                                 'diet', 'dietNote'])
           && isStr(d.name, 1, 60) && isStr(d.phone, 0, 20) && d.ownerUid is string
           && optStr(d, 'householdId', 40)
           && (!('isChild' in d) || d.isChild is bool)
           && (!('status' in d) || d.status in ['yes', 'maybe', 'no'])
-          && optStr(d, 'addedByUid', 128);
+          && optStr(d, 'addedByUid', 128)
+          && (!('diet' in d) || (d.diet is list && d.diet.size() <= 10))            // kost/allergier (vegetar, noedder …)
+          && optStr(d, 'dietNote', 120);
       }
       function hhDoc(pid, hid) { return /databases/$(database)/documents/parties/$(pid)/households/$(hid); }
       function hhOf(d) { return d.get('householdId', ''); }
@@ -207,8 +224,10 @@ service cloud.firestore {
       match /activity/{aid} {
         allow read: if signedIn();
         allow create: if signedIn() && partyExists(pid)
-          && request.resource.data.keys().hasOnly(['type', 'text', 'actorUid', 'participantId', 'hasCost', 'createdAt'])
-          && request.resource.data.type in ['guest', 'item', 'cost', 'party']
+          && request.resource.data.keys().hasOnly(['type', 'text', 'actorUid', 'participantId', 'hasCost', 'targetPids', 'createdAt'])
+          && request.resource.data.type in ['guest', 'item', 'cost', 'party', 'payment']
+          && (!('targetPids' in request.resource.data)                                  // målrettet (fx betalingspåmindelse)
+              || (request.resource.data.targetPids is list && request.resource.data.targetPids.size() <= 50))
           && (request.resource.data.type != 'party' || isAdmin(pid))
           && isStr(request.resource.data.text, 1, 200)
           && request.resource.data.actorUid == request.auth.uid
@@ -234,7 +253,7 @@ service cloud.firestore {
                 && d.channels.push.keys is map && d.channels.push.keys.keys().hasOnly(['p256dh', 'auth'])
                 && isStr(d.channels.push.keys.p256dh, 1, 200) && isStr(d.channels.push.keys.auth, 1, 100)
                 && (!('ua' in d.channels.push) || isStr(d.channels.push.ua, 0, 40))))
-          && d.topics is map && d.topics.keys().hasOnly(['guests', 'items', 'party', 'costs', 'reminder'])
+          && d.topics is map && d.topics.keys().hasOnly(['guests', 'items', 'party', 'costs', 'payments', 'reminder'])
           && d.frequency in ['instant', 'daily', 'reminderOnly']
           && d.digestHour is int && d.digestHour >= 0 && d.digestHour <= 23
           && d.reminderBefore in ['1d', '3h']
@@ -258,7 +277,7 @@ service cloud.firestore {
       // ── Retter, aktiviteter og udgifter ──────────────────────────────────────
       function validItem(d) {
         return d.keys().hasOnly(['eventId', 'participantId', 'ownerUid', 'title', 'kind', 'servings',
-                                 'note', 'cost', 'split', 'among', 'createdAt'])
+                                 'note', 'cost', 'split', 'among', 'tags', 'suggestionId', 'createdAt'])
           && isStr(d.title, 1, 100) && d.eventId is string && d.participantId is string
           && d.ownerUid is string
           && (!('kind' in d) || d.kind in ['ret', 'aktivitet', 'andet', 'udgift'])
@@ -266,7 +285,9 @@ service cloud.firestore {
           && optStr(d, 'note', 500)
           && (!('cost' in d) || (d.cost is int && d.cost >= 0 && d.cost <= 100000000))   // øre, max 1 mio. kr.
           && (!('split' in d) || d.split in ['all', 'selected', 'households', 'none'])   // 'none' = deles ikke (betaler selv)
-          && (!('among' in d) || (d.among is list && d.among.size() <= 200));
+          && (!('among' in d) || (d.among is list && d.among.size() <= 200))
+          && (!('tags' in d) || (d.tags is list && d.tags.size() <= 10))              // noedder, gluten, vegetar …
+          && optStr(d, 'suggestionId', 40);
       }
       match /items/{iid} {
         allow read: if signedIn();
@@ -276,6 +297,98 @@ service cloud.firestore {
         allow update: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid))
           && validItem(request.resource.data) && unchanged(['ownerUid', 'createdAt']);
         allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+      }
+
+      // ── Forslag: "Det mangler vi" ────────────────────────────────────────────
+      // Alle kan foreslå. "Jeg tager den": opret en ret (med suggestionId) og sæt takenItemId på forslaget i
+      // SAMME batch – retten skal findes efter skrivningen og være ens egen. Den, der tog forslaget (eller
+      // værten), kan fortryde. Et forslag, hvis ret er slettet, er ledigt igen. Opretteren/værten kan slette.
+      function itemDoc(pid, iid) { return /databases/$(database)/documents/parties/$(pid)/items/$(iid); }
+      function takenFields() { return ['takenByUid', 'takenByPid', 'takenItemId', 'takenAt']; }
+      function validSuggestion(d) {
+        return d.keys().hasOnly(['title', 'eventId', 'note', 'ownerUid', 'byPid', 'createdAt',
+                                 'takenByUid', 'takenByPid', 'takenItemId', 'takenAt'])
+          && isStr(d.title, 1, 100) && isStr(d.eventId, 0, 40) && optStr(d, 'note', 200)
+          && d.ownerUid is string && optStr(d, 'byPid', 40)
+          && optStr(d, 'takenByUid', 128) && optStr(d, 'takenByPid', 40) && optStr(d, 'takenItemId', 40);
+      }
+      function sugFree(d) {
+        return d.get('takenItemId', '') == '' || !exists(itemDoc(pid, d.get('takenItemId', '')));
+      }
+      match /suggestions/{sid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid)
+          && validSuggestion(request.resource.data)
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && !request.resource.data.keys().hasAny(takenFields());
+        allow update: if signedIn() && validSuggestion(request.resource.data) && unchanged(['ownerUid', 'createdAt', 'byPid'])
+          && (
+            // opretteren/værten retter tekst og ret
+            ((resource.data.ownerUid == request.auth.uid || isAdmin(pid))
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'eventId', 'note']))
+            // "Jeg tager den" (i samme batch som retten)
+            || (sugFree(resource.data)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(takenFields())
+              && request.resource.data.takenByUid == request.auth.uid
+              && request.resource.data.takenAt == request.time
+              && isStr(request.resource.data.takenItemId, 1, 40)
+              && existsAfter(itemDoc(pid, request.resource.data.takenItemId))
+              && getAfter(itemDoc(pid, request.resource.data.takenItemId)).data.ownerUid == request.auth.uid)
+            // "Fortryd": den, der tog den, eller værten sætter den tilbage som forslag
+            || ((resource.data.get('takenByUid', '') == request.auth.uid || isAdmin(pid))
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(takenFields())
+              && request.resource.data.get('takenItemId', '') == '' && request.resource.data.get('takenByUid', '') == '')
+          );
+        allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+      }
+
+      // ── Betalinger mellem husstande ("Jeg har betalt" / "Modtaget") ───────────
+      // fromUnit/toUnit = husstands-id eller (for enlige) deltager-id. fromPid/toPid = personerne, så
+      // betalingen kan følge dem, hvis husstande ændres. Status 'marked' → 'confirmed'.
+      function pDoc(pid, ppid) { return /databases/$(database)/documents/parties/$(pid)/participants/$(ppid); }
+      // Er jeg med i enheden? (medlem af husstanden, eller ejer af deltageren)
+      function unitMember(pid, u) {
+        return (exists(hhDoc(pid, u)) && get(hhDoc(pid, u)).data.memberUids.hasAny([request.auth.uid]))
+          || (exists(pDoc(pid, u)) && get(pDoc(pid, u)).data.ownerUid == request.auth.uid);
+      }
+      function validPayment(d) {
+        return d.keys().hasOnly(['fromUnit', 'toUnit', 'fromPid', 'toPid', 'amount', 'status', 'ownerUid', 'createdAt',
+                                 'confirmedByUid', 'confirmedAt'])
+          && d.keys().hasAll(['fromUnit', 'toUnit', 'amount', 'status', 'ownerUid'])
+          && isStr(d.fromUnit, 1, 40) && isStr(d.toUnit, 1, 40) && d.fromUnit != d.toUnit
+          && optStr(d, 'fromPid', 40) && optStr(d, 'toPid', 40)
+          && d.amount is int && d.amount > 0 && d.amount <= 100000000
+          && d.status in ['marked', 'confirmed']
+          && d.ownerUid is string;
+      }
+      match /payments/{payid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid)
+          && validPayment(request.resource.data)
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && (
+            // "Jeg har betalt" – fra min husstand (eller værten registrerer)
+            (request.resource.data.status == 'marked' && !('confirmedByUid' in request.resource.data)
+              && !('confirmedAt' in request.resource.data)
+              && (unitMember(pid, request.resource.data.fromUnit) || isAdmin(pid)))
+            // "Modtaget" direkte (fx kontant) – af modtageren (eller værten)
+            || (request.resource.data.status == 'confirmed' && request.resource.data.confirmedByUid == request.auth.uid
+              && request.resource.data.confirmedAt == request.time
+              && (unitMember(pid, request.resource.data.toUnit) || isAdmin(pid)))
+          );
+        // Bekræft en markering: kun status/confirmedByUid/confirmedAt ændres, af modtageren (eller værten)
+        allow update: if signedIn() && validPayment(request.resource.data)
+          && resource.data.status == 'marked' && request.resource.data.status == 'confirmed'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'confirmedByUid', 'confirmedAt'])
+          && request.resource.data.confirmedByUid == request.auth.uid
+          && request.resource.data.confirmedAt == request.time
+          && (unitMember(pid, resource.data.toUnit) || isAdmin(pid));
+        // Fortryd (den der markerede) / "Ikke modtaget" (modtageren) / fortryd bekræftelse (den der bekræftede) / værten
+        allow delete: if signedIn() && (isAdmin(pid)
+          || (resource.data.status == 'marked' && (resource.data.ownerUid == request.auth.uid || unitMember(pid, resource.data.toUnit)))
+          || (resource.data.status == 'confirmed' && resource.data.get('confirmedByUid', '') == request.auth.uid));
       }
     }
 

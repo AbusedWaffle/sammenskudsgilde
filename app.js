@@ -1,11 +1,12 @@
 import { createStore } from './data.js';
 import { settle, parseKr, formatKr, headcount, statusOf, unitsOf } from './settle.js';
 import { cleanPhone, prettyPhone, mobilepayPhone, isValidPhone } from './util.js';
+import { DIET, DISH_TAGS, cleanTags, dietOverview, dishConflicts, buildIcs, googleCalendarUrl, icsFileName, openSuggestions, isTaken, emptyCourses } from './features.js';
 import { pushSupport, subscribePush, localNotification, registerServiceWorker, isIOS as isIOSDevice, isStandalone, deviceLabel } from './push.js';
 
-const APP_VERSION = '1.4';
-const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
-const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['reminder', '⏰ Påmindelse før festen']];
+const APP_VERSION = '1.5';
+const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, payments: true, reminder: true };
+const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter, forslag og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['payments', '💸 Betalinger og påmindelser om betaling'], ['reminder', '⏰ Påmindelse før festen']];
 
 // ───────────────────────────── Hjælpere ─────────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -70,10 +71,50 @@ const childBox = (label, checked, t = 'is-child') => `<div class="childbox"><lab
   <p class="small muted" data-t="child-help">${CHILD_HELP}</p></div>`;
 const ITEM_KINDS = { ret: ['🍽️', 'Ret'], aktivitet: ['🎲', 'Aktivitet'], andet: ['🎁', 'Andet'], udgift: ['🧾', 'Udgift'] };
 
+// ── Kost og allergier (v1.5) ─────────────────────────────────────────────
+const DIET_HELP = 'Så kan de andre tage hensyn, når de laver mad. Alle med linket kan se det.';
+const dietOrder = list => Object.keys(DIET).filter(k => (list || []).includes(k));
+/** Afkrydsning af kost/allergier + fritekst (bruges ved tilmelding, „Ret min tilmelding“ og husstandens personer). */
+const dietBox = (p, t = 'diet-box') => {
+  const sel = new Set(cleanTags(p?.diet, DIET));
+  return `<div class="dietbox" data-t="${t}"><span class="lbl">🥗 Kost og allergier (valgfrit)</span>
+    <div class="tagpick">${Object.entries(DIET).map(([k, [ic, l]]) => `<label class="tagchip"><input type="checkbox" name="diet" value="${k}" ${sel.has(k) ? 'checked' : ''} data-t="diet-${k}"><span>${ic} ${l}</span></label>`).join('')}</div>
+    <input type="text" name="dietNote" maxlength="120" value="${esc(p?.dietNote || '')}" placeholder="Andet – fx ingen svampe, skaldyrsallergi" data-t="diet-note">
+    <p class="small muted" data-t="diet-help">${DIET_HELP}</p></div>`;
+};
+const readDiet = f => ({ diet: dietOrder($$('input[name=diet]:checked', f).map(x => x.value)), dietNote: (f.dietNote?.value || '').trim().slice(0, 120) });
+/** Kun ændrede kost-felter (tomme felter skrives ikke på nye poster – så virker det også med ældre regler). */
+function dietUpd(f, old) {
+  if (!f.querySelector('[name=diet]')) return {};
+  const d = readDiet(f), o = {};
+  if (d.diet.join() !== dietOrder(cleanTags(old?.diet, DIET)).join()) o.diet = d.diet;
+  if (d.dietNote !== (old?.dietNote || '')) o.dietNote = d.dietNote;
+  return o;
+}
+const dietChips = p => cleanTags(p?.diet, DIET).map(k => `<span class="dchip">${DIET[k][0]} ${DIET[k][1]}</span>`).join('') + (p?.dietNote ? `<span class="dchip">📝 ${esc(p.dietNote)}</span>` : '');
+const dishBadges = it => cleanTags(it?.tags, DISH_TAGS).map(k => `<span class="dchip">${DISH_TAGS[k][0]} ${DISH_TAGS[k][1]}</span>`).join('');
+const DIET_VERB = { noedder: ['har nøddeallergi', 'har nøddeallergi'], glutenfri: ['spiser glutenfrit', 'spiser glutenfrit'], laktosefri: ['spiser laktosefrit', 'spiser laktosefrit'],
+  vegetar: ['er vegetar', 'er vegetarer'], vegansk: ['er veganer', 'er veganere'] };
+const andList = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' og ' + xs.at(-1);
+/** Diskret advarsel, hvis retten ikke passer til nogen, der kommer. */
+function conflictHtml(it) {
+  const c = dishConflicts(it, S.participants);
+  return c.length ? `<div class="dwarn" data-t="diet-warn">${c.map(x => `⚠️ ${DISH_TAGS[x.tag][1]} – ${esc(andList(x.people.map(p => firstName(p.name))))} ${DIET_VERB[x.diet][x.people.length === 1 ? 0 : 1]}`).join('<br>')}</div>` : '';
+}
+const dishTagBox = it => {
+  const sel = new Set(cleanTags(it?.tags, DISH_TAGS));
+  return `<div class="dietbox" id="tag-box" data-t="dish-tags"><span class="lbl">🏷️ Kost og allergener (valgfrit)</span>
+    <div class="tagpick">${Object.entries(DISH_TAGS).map(([k, [ic, l]]) => `<label class="tagchip"><input type="checkbox" name="tags" value="${k}" ${sel.has(k) ? 'checked' : ''} data-t="tag-${k}"><span>${ic} ${l}</span></label>`).join('')}</div>
+    <p class="small muted">Så kan gæster med allergi eller særlig kost se, hvad de kan spise. Appen advarer diskret, hvis retten ikke passer til nogen, der kommer.</p></div>`;
+};
+const sugById = id => S.suggestions.find(x => x.id === id);
+const sugOn = () => !S.sugDenied;
+const payOn = () => !S.payDenied;
+
 // ───────────────────────────── Tilstand ─────────────────────────────
 let store;
 const S = {
-  view: 'home', pid: null, party: undefined, events: [], participants: [], items: [], households: [],
+  view: 'home', pid: null, party: undefined, events: [], participants: [], items: [], households: [], suggestions: [], payments: [],
   loaded: {}, admin: false, tab: 'program', unsubs: [], error: null, justCreated: false,
 };
 window.__sg = S; // til fejlsøgning/tests
@@ -123,7 +164,7 @@ async function route() {
 function stopWatching() { S.unsubs.forEach(u => u()); S.unsubs = []; }
 function startWatching(pid) {
   stopWatching();
-  Object.assign(S, { pid, party: undefined, events: [], participants: [], items: [], households: [], loaded: {}, admin: false, error: null, tab: 'program', hhDenied: false });
+  Object.assign(S, { pid, party: undefined, events: [], participants: [], items: [], households: [], suggestions: [], payments: [], loaded: {}, admin: false, error: null, tab: 'program', hhDenied: false, sugDenied: false, payDenied: false, skipClaim: false });
   const onErr = what => e => { console.warn(what, e); S.error = errMsg(e); render(); };
   S.unsubs.push(store.watchParty(pid, async party => {
     if (party) party.id = pid;
@@ -148,6 +189,11 @@ function startWatching(pid) {
   // Husstande: fejler stille (fx hvis serverens regler endnu ikke kender husstande) – så er alle deres egen husstand.
   S.unsubs.push(store.watchSub(pid, 'households', docs => { S.households = docs; S.loaded.households = true; render(); },
     e => { console.warn('husstande', e?.code || e); S.households = []; S.hhDenied = true; S.loaded.households = true; render(); }));
+  // Forslag og betalinger (v1.5): fejler stille, hvis serverens regler endnu ikke kender dem – så skjules funktionerne.
+  for (const [sub, flag] of [['suggestions', 'sugDenied'], ['payments', 'payDenied']]) {
+    S.unsubs.push(store.watchSub(pid, sub, docs => { S[sub] = docs; S.loaded[sub] = true; render(); },
+      e => { console.warn(sub, e?.code || e); S[sub] = []; S[flag] = true; S.loaded[sub] = true; render(); }));
+  }
 }
 
 // ───────────────────────────── Render ─────────────────────────────
@@ -156,15 +202,18 @@ function render() {
   const y = scrollY;
   // Bevar indtastning i formularer på siden, når live-opdateringer tegner siden igen.
   const kept = $$('form[id] input:not([type=hidden]), form[id] textarea', app).map(el => ({ f: el.form.id, n: el.name, v: el.value, c: el.checked, box: el.type === 'checkbox', focus: el === document.activeElement, sel: el.selectionStart }));
+  const openDetails = $$('details[id][open]', app).map(d => d.id);
   app.innerHTML = S.view === 'home' ? homeView() : partyView();
+  for (const id of openDetails) { const d = document.getElementById(id); if (d) d.open = true; }
   for (const k of kept) {
-    const el = $(`form#${k.f} [name="${k.n}"]`, app); if (!el) continue;
+    const el = (k.box && $(`form#${k.f} [name="${k.n}"][value="${CSS.escape(k.v)}"]`, app)) || $(`form#${k.f} [name="${k.n}"]`, app); if (!el) continue;
     if (k.box) el.checked = k.c; else el.value = k.v;
     if (k.focus) { el.focus(); try { el.setSelectionRange(k.sel, k.sel); } catch {} }
   }
   if (S.view === 'party' && S.tab === 'del') drawQr();
   scrollTo(0, y);
   if (S.justCreated && S.party && S.loaded.participants) { S.justCreated = false; afterCreate(); }
+  if (S.justReused && S.party && S.loaded.participants && S.loaded.events) { const info = S.justReused; S.justReused = null; afterReuse(info); }
 }
 
 function topbar(back) {
@@ -235,6 +284,7 @@ function partyView() {
     ${heroCount()}
     <div class="row-actions">
       <button class="btn sm yellow" data-act="tab" data-tab="del">🔗 Inviter gæster</button>
+      ${p.date ? `<button class="btn sm" data-act="calendar" data-t="calendar">📅 Tilføj til kalender</button>` : ''}
       ${S.admin ? `<button class="btn sm" data-act="edit-party" data-t="edit-party">✏️ Ret gildet</button>` : ''}
     </div>
   </div>
@@ -278,6 +328,7 @@ function identityBar() {
     <label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required autocomplete="name" value="${esc(prof.name || '')}" placeholder="Dit navn"></label>
     <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" autocomplete="tel" inputmode="tel" value="${esc(prof.phone || '')}" placeholder="12 34 56 78"></label>
     ${childBox('Jeg er barn', false, 'join-child')}
+    <details class="dietdetails" id="join-diet"><summary data-t="join-diet-open">🥗 Allergier eller særlig kost? (valgfrit)</summary>${dietBox(null, 'join-diet-box')}</details>
     <div class="err" id="join-err"></div>
     <button class="btn primary block" style="margin-top:12px" data-t="join">Tilmeld mig</button>
   </form>`;
@@ -300,8 +351,14 @@ function itemRow(it) {
   if (it.servings) bits.push(`til ${it.servings} pers.`);
   if (it.cost) bits.push(`<span class="cost">${formatKr(it.cost)}</span> (${splitText(it, true)})`);   // "Ingen": (deles ikke – betaler selv)
   const mine = it.participantId === myId();
-  return `<li class="item${mine ? ' mine' : ''}" data-t="item"><span class="it-ic">${ic}</span><div class="grow">
-    <div class="t">${esc(it.title)}</div><div class="s">${bits.join(' · ')}</div>${it.note ? `<div class="n">${esc(it.note)}</div>` : ''}</div>
+  const sug = it.suggestionId && sugById(it.suggestionId);
+  const fromSug = sug && sug.takenItemId === it.id;
+  const canUndo = fromSug && (sug.takenByUid === store.uid || S.admin);
+  const badges = dishBadges(it);
+  return `<li class="item${mine ? ' mine' : ''}" data-t="item" data-title="${esc(it.title)}"><span class="it-ic">${ic}</span><div class="grow">
+    <div class="t">${esc(it.title)}${fromSug ? ' <span class="tag sugtag" data-t="from-suggestion">💡 fra forslag</span>' : ''}</div><div class="s">${bits.join(' · ')}</div>${it.note ? `<div class="n">${esc(it.note)}</div>` : ''}
+    ${badges ? `<div class="dchips">${badges}</div>` : ''}${conflictHtml(it)}
+    ${canUndo ? `<button class="linkbtn small" data-act="untake-suggestion" data-id="${sug.id}" data-t="untake">↩︎ Fortryd – gør det til et forslag igen</button>` : ''}</div>
     ${canEditItem(it) ? `<button class="btn sm ghost" data-act="edit-item" data-id="${it.id}" aria-label="Ret">✏️</button>` : ''}</li>`;
 }
 
@@ -319,24 +376,56 @@ function programTab() {
     </div></div>` : '';
   if (!S.loaded.events) return '';
   const loose = S.items.filter(i => !i.eventId || !S.events.find(e => e.id === i.eventId));
+  const empties = new Set(emptyCourses(evs, S.items).map(e => e.id));
+  const openSug = sugOn() ? openSuggestions(S.suggestions, S.items) : [];
   const cards = evs.map((ev, idx) => {
     const its = S.items.filter(i => i.eventId === ev.id).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     const serv = its.filter(i => i.kind !== 'aktivitet').reduce((s, i) => s + (i.servings || 0), 0);
+    const evSug = openSug.filter(x => x.eventId === ev.id);
+    const lower = ev.title.toLowerCase();
     return `<section class="card event" data-t="event" data-title="${esc(ev.title)}">
       <div class="ev-head"><span class="ev-ic">${eventIcon(ev)}</span>
         <div class="ev-title"><h3>${ev.time ? `<span class="time">${esc(ev.time)}</span>` : ''}${esc(ev.title)}</h3>
-        <div class="ev-sum">${its.length ? `${its.length} ${its.length === 1 ? 'bidrag' : 'bidrag'}${serv ? ` · mad til ca. ${serv} pers.` : ''}` : 'Ingen har skrevet sig på endnu'}</div></div>
+        <div class="ev-sum">${its.length ? `${its.length} ${its.length === 1 ? 'bidrag' : 'bidrag'}${serv ? ` · mad til ca. ${serv} pers.` : ''}` : empties.has(ev.id) ? 'Ingen bidrag endnu' : 'Ingen har skrevet sig på endnu'}</div></div>
         ${S.admin ? `<div class="admin-bar">${idx > 0 ? `<button class="btn sm ghost" data-act="move-event" data-id="${ev.id}" data-dir="-1" aria-label="Flyt op">↑</button>` : ''}<button class="btn sm ghost" data-act="edit-event" data-id="${ev.id}" aria-label="Ret punkt">⋯</button></div>` : ''}
       </div>
       ${its.length ? `<ul class="items">${its.map(itemRow).join('')}</ul>` : ''}
-      <div class="ev-foot"><button class="addbtn" data-act="new-item" data-event="${ev.id}" data-t="add-item">+ Jeg tager noget med</button></div>
+      ${empties.has(ev.id) && S.loaded.items ? `<div class="hint" data-t="course-hint">💡 Ingen har meldt ${esc(lower)} endnu. Tag noget med – eller foreslå noget, så en anden kan tage det.</div>` : ''}
+      ${evSug.length ? `<div class="sugline" data-t="event-suggestions">💡 Forslag: ${evSug.map(x => `<button class="chip" data-act="take-suggestion" data-id="${x.id}">${esc(x.title)} · jeg tager den</button>`).join(' ')}</div>` : ''}
+      <div class="ev-foot"><button class="addbtn" data-act="new-item" data-event="${ev.id}" data-t="add-item">+ Jeg tager noget med</button>
+        ${sugOn() && ev.kind !== 'program' ? `<button class="linkbtn small" data-act="new-suggestion" data-event="${ev.id}" data-t="suggest-for-event">💡 Foreslå noget til ${esc(lower)}</button>` : ''}</div>
     </section>`;
   }).join('');
   const empty = !evs.length ? `<div class="card empty"><div class="big">🍽️</div><p>${S.admin ? 'Tilføj forret, hovedret, dessert eller programpunkter herover – så kan gæsterne skrive sig på.' : 'Værten har ikke lagt program eller retter ind endnu. Du kan stadig skrive, hvad du tager med:'}</p>
     ${!S.admin ? `<button class="btn" data-act="new-item" data-event="">+ Jeg tager noget med</button>` : ''}</div>` : '';
   const looseCard = loose.filter(i => i.kind !== 'udgift').length ? `<section class="card event"><div class="ev-head"><span class="ev-ic">🧺</span><div class="ev-title"><h3>Andet</h3></div></div>
     <ul class="items">${loose.filter(i => i.kind !== 'udgift').map(itemRow).join('')}</ul><div class="ev-foot"></div></section>` : '';
-  return (evs.length ? cards + presets : presets + empty) + looseCard;
+  return dietLine() + suggestionsCard() + (evs.length ? cards + presets : presets + empty) + looseCard;
+}
+
+/** Diskret påmindelse om kost/allergier øverst i programmet. */
+function dietLine() {
+  const d = dietOverview(S.participants);
+  return d.text ? `<div class="dline" data-t="diet-line">🥗 Husk: <b>${esc(d.text)}</b> <button class="linkbtn small" data-act="tab" data-tab="gaester">Se mere</button></div>` : '';
+}
+
+/** "Det mangler vi": forslag som alle kan tilføje, og som en gæst kan tage. */
+function suggestionsCard() {
+  if (!sugOn() || !S.loaded.suggestions) return '';
+  const open = openSuggestions(S.suggestions, S.items);
+  const taken = S.suggestions.filter(x => isTaken(x, S.items));
+  const evName = id => S.events.find(e => e.id === id)?.title;
+  const canDel = x => x.ownerUid === store.uid || S.admin;
+  return `<div class="card sug" data-t="suggestions"><div class="sug-head"><h2>💡 Det mangler vi</h2>
+    <button class="btn sm primary" data-act="new-suggestion" data-event="" data-t="new-suggestion">+ Foreslå</button></div>
+    <p class="small muted" style="margin:4px 0 0">${open.length ? 'Kan du tage noget af det her med? Tryk „Jeg tager den“ – så står det på dig.' : taken.length ? 'Alt er taget – tak! 🎉 Mangler der mere, så foreslå det.' : 'Mangler der noget – is, stole, isterninger? Foreslå det, så kan en anden trykke „Jeg tager den“.'}</p>
+    ${open.length ? `<ul class="sugs">${open.map(x => `<li data-t="suggestion" data-title="${esc(x.title)}"><div class="grow"><b>${esc(x.title)}</b>
+      <div class="small muted">${evName(x.eventId) ? `til ${esc(evName(x.eventId))} · ` : ''}foreslået af ${esc(x.byPid && pById(x.byPid) ? firstName(pName(x.byPid)) : 'en gæst')}</div>${x.note ? `<div class="small">${esc(x.note)}</div>` : ''}</div>
+      <button class="btn sm green" data-act="take-suggestion" data-id="${x.id}" data-t="take">✋ Jeg tager den</button>
+      ${canDel(x) ? `<button class="btn sm ghost" data-act="delete-suggestion" data-id="${x.id}" data-t="delete-suggestion" aria-label="Slet forslaget">🗑️</button>` : ''}</li>`).join('')}</ul>` : ''}
+    ${taken.length ? `<details class="taken" id="sug-taken"><summary data-t="taken-summary">✔️ Taget (${taken.length})</summary><ul class="sugs">${taken.map(x => `<li data-t="taken-suggestion"><div class="grow"><b>${esc(x.title)}</b> <span class="small muted">– ${esc(firstName(pName(S.items.find(i => i.id === x.takenItemId)?.participantId)))} tager den</span></div>
+      ${x.takenByUid === store.uid || S.admin ? `<button class="btn sm ghost" data-act="untake-suggestion" data-id="${x.id}">↩︎ Fortryd</button>` : ''}</li>`).join('')}</ul></details>` : ''}
+  </div>`;
 }
 
 function guestsTab() {
@@ -353,9 +442,19 @@ function guestsTab() {
       <div class="hc-maybe"><b data-t="hc-maybe">${c.maybe.adults + c.maybe.children}</b><span>🤔 Måske</span><small>${cnt(c.maybe)}</small></div>
       <div class="hc-no"><b data-t="hc-no">${c.no.adults + c.no.children}</b><span>❌ Kommer ikke</span><small>${cnt(c.no)}</small></div>
     </div></div>
+  ${dietCard(ps, m)}
   ${m && hhOn() ? myHouseholdCard(m) : ''}
   ${hhUnits.map(u => householdCard(u)).join('')}
   ${solos.length ? `<div class="card" data-t="solo-card"><h3>${hhUnits.length ? 'Uden husstand' : `Gæster (${ps.length})`}</h3><ul class="people" style="margin-top:6px">${solos.map(u => personRow(u.members[0])).join('')}</ul></div>` : ''}`;
+}
+
+function dietCard(ps, m) {
+  const d = dietOverview(ps);
+  if (!d.text && !d.notes.length) return m ? `<div class="card slim" data-t="diet-overview"><p class="small muted" style="margin:0">🥗 Allergier eller særlig kost? Skriv det under <button class="linkbtn small" data-act="edit-me">Ret min tilmelding</button> – så kan de andre tage hensyn.</p></div>` : '';
+  return `<div class="card" data-t="diet-overview"><h3>🥗 Kost og allergier</h3>
+    ${d.text ? `<p style="margin:6px 0 4px" data-t="diet-summary"><b>${esc(d.text)}</b></p>` : ''}
+    ${d.notes.map(n => `<div class="small">📝 <b>${esc(n.name)}</b>: ${esc(n.note)}</div>`).join('')}
+    <p class="small muted" style="margin:8px 0 0">Tæller dem, der kommer eller måske kommer. Retter kan mærkes med fx „Indeholder nødder“ – så advarer appen diskret. Ret dit eget under ⚙️ → Ret min tilmelding.</p></div>`;
 }
 
 function personRow(p) {
@@ -366,6 +465,7 @@ function personRow(p) {
   if (its.length) info.push(its.map(i => esc(i.title)).join(', '));
   return `<li class="person${st === 'no' ? ' is-no' : ''}" data-t="person" data-name="${esc(p.name)}">${avatar(p)}<div class="grow"><div class="nm">${mine && p.ownerUid === store.uid ? `<button class="linkbtn nmbtn" data-act="edit-me" title="Ret min tilmelding">${esc(p.name)}</button>` : esc(p.name)}${mine ? '<span class="tag">dig</span>' : ''}${host ? '<span class="tag host">vært</span>' : ''}${p.isChild ? '<span class="tag kid">barn</span>' : ''}</div>
       <div class="small muted">${info.join(' · ')}</div>
+      ${dietChips(p) ? `<div class="dchips" data-t="person-diet">${dietChips(p)}</div>` : ''}
       ${!hhOn() ? '' : edit && !mine ? rsvpSeg(p, true) : `<div class="st st-${st}" data-t="status">${STATUS[st][0]} ${STATUS[st][1]}</div>`}</div>
       ${mine && p.ownerUid === store.uid ? `<button class="btn sm ghost" data-act="edit-me" data-t="edit-me-row" aria-label="Ret min tilmelding">✏️</button>`
         : edit && !mine && hhOn() ? `<button class="btn sm ghost" data-act="edit-person" data-id="${p.id}" data-t="edit-person" aria-label="Ret ${esc(p.name)}">✏️</button>`
@@ -412,8 +512,18 @@ function splitText(it, short = false) {
 function computeSettlement() {
   const ps = sortedPeople();
   const costs = S.items.filter(i => i.cost > 0).map(i => ({ id: i.id, title: i.title, payer: i.participantId, amount: i.cost, split: i.split || 'all', among: i.among || [] }));
-  return { ps, r: settle(ps, costs, S.households) };
+  return { ps, r: settle(ps, costs, S.households, payOn() ? S.payments : []) };
 }
+/** Må jeg handle på vegne af enheden (husstand: medlem; enlig: ejeren)? */
+function unitCanAct(u) {
+  if (!u) return false;
+  return u.household ? isMemberOf(u.id) : u.members.some(m => m.ownerUid && m.ownerUid === store.uid);
+}
+const unitPids = u => (u?.members || []).map(m => m.id);
+/** Hvem i enheden betaler (mig, hvis jeg er med – ellers en med bruger)? */
+const payerOf = u => u.members.find(m => m.id === myId()) || u.members.find(m => m.ownerUid) || u.members[0];
+const remindKey = (from, to) => `sg:remind:${S.pid}:${from}>${to}`;
+const hhmm = ms => new Date(ms).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
 /** Navn på en husstand/enhed i regnskabet: "Familien Wriedt" + dem med bruger; enkeltpersoner med navn. */
 function unitLabel(u) {
   if (!u) return { name: 'Ukendt', sub: '' };
@@ -457,7 +567,15 @@ function moneyTab() {
     const mp = `mobilepay://send?phone=${encodeURIComponent(mpPhone)}&amount=${kr}&comment=${encodeURIComponent(comment)}&lock=1`;
     const sms = `sms:${cleanPhone(to?.phone)}${isApple ? '&' : '?'}body=${encodeURIComponent(`Hej ${firstName(to?.name)}! Jeg har sendt ${formatKr(t.amount)} for ${party.name} 🙂`)}`;
     const who = (u, l) => `<span class="tr-party">${avatar({ id: u.id, name: l.name })}<span><b>${esc(l.name)}</b>${l.sub ? `<small>${esc(l.sub)}</small>` : ''}</span></span>`;
-    return `<div class="transfer ${cls}" data-t="transfer">
+    const pdata = `data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amount="${t.amount}"`;
+    const reminded = LS.get(remindKey(t.from, t.to));
+    const canRemind = (unitCanAct(toU) || S.admin) && fromU.members.some(m => m.ownerUid);
+    const payBtns = payOn() ? `<div class="pay-row"><span class="pstat miss" data-t="pay-status">⏳ Mangler</span>
+      ${unitCanAct(fromU) ? `<button class="btn sm green" data-act="pay-mark" ${pdata} data-t="pay-mark">✅ ${fromU.household ? 'Vi har' : 'Jeg har'} betalt</button>` : ''}
+      ${unitCanAct(toU) || S.admin ? `<button class="btn sm" data-act="pay-receive" ${pdata} data-t="pay-receive">💰 Modtaget</button>` : ''}
+      ${canRemind ? `<button class="btn sm ghost" data-act="pay-remind" ${pdata} data-t="pay-remind">🔔 Send påmindelse</button>` : ''}
+      ${reminded && canRemind ? `<span class="small muted" data-t="reminded">Påmindelse sendt ${new Date(reminded).toDateString() === new Date().toDateString() ? 'i dag' : prettyDate(new Date(reminded).toISOString().slice(0, 10), true)} kl. ${hhmm(reminded)}</span>` : ''}</div>` : '';
+    return `<div class="transfer ${cls}" data-t="transfer" data-from="${esc(t.from)}" data-to="${esc(t.to)}">
       ${cls === 'me-pay' ? `<div class="tr-who">${fromU.household ? 'I skal betale' : 'Du skal betale'}</div>` : cls === 'me-get' ? `<div class="tr-who">${toU.household ? 'I skal have' : 'Du skal have'}</div>` : ''}
       <div class="tr-line">${who(fromU, fl)} <span class="muted">→</span> ${who(toU, tl)}<span class="tr-amt mono">${formatKr(t.amount)}</span></div>
       ${to?.phone ? `<div class="small muted" style="margin-top:6px">MobilePay til <b style="color:var(--ink)">${esc(firstName(to.name))}</b> på <b class="mono" style="color:var(--ink)">${esc(prettyPhone(to.phone))}</b> · beløb <b class="mono" style="color:var(--ink)">${formatKr(t.amount)}</b></div>
@@ -467,23 +585,86 @@ function moneyTab() {
         ${t.from === meUnit || !meId ? `<a class="btn sm mp full" href="${esc(mp)}" data-act="mobilepay">Åbn MobilePay</a>` : ''}
         ${t.from === meUnit ? `<a class="btn sm ghost full" href="${esc(sms)}">💬 Send SMS til ${esc(firstName(to.name))}</a>` : ''}
       </div>` : '<div class="small muted" style="margin-top:6px">Ingen i den husstand har skrevet et telefonnummer.</div>'}
+      ${payBtns}
     </div>`;
   }).join('');
+  const hasPay = r.settled.length > 0;
   const coming = ps.filter(p => statusOf(p) !== 'no' && !p.isChild).length || ps.length;
   return `<div class="card" data-t="summary"><h2>Regnskab</h2>
     <div class="bigsum" style="margin-top:10px"><div><b class="mono" data-t="total">${formatKr(r.total)}</b><span>i alt</span></div><div><b>${r.units.length}</b><span>${hasHh ? 'husstande' : 'deltagere'}</span></div><div><b class="mono">${formatKr(Math.round(r.total / Math.max(1, coming)))}</b><span>gns. pr. voksen</span></div></div>
   </div>
+  ${S.admin && payOn() ? hostOverview(r, unit) : ''}
   <div class="card"><h2>Hvem skylder hvem</h2>
     ${hasHh ? '<p class="small muted" style="margin:4px 0 8px">Samlet pr. husstand – én overførsel pr. husstand.</p>' : ''}
-    ${r.transfers.length ? transfers + `<p class="small muted" style="margin:12px 0 0">„Åbn MobilePay“ forsøger at åbne appen med nummer og beløb udfyldt. MobilePay understøtter ikke dette officielt – sker der ikke noget, så kopiér nummeret og beløbet.</p>` : '<p class="muted">Alle er kvit – ingen skylder noget. 🎉</p>'}
+    ${payOn() && r.transfers.length ? '<p class="small muted" style="margin:4px 0 8px">Har I betalt, så tryk „Jeg har betalt“ – modtageren bekræfter „Modtaget“. Betalinger tæller med, også hvis udgifterne ændres bagefter.</p>' : ''}
+    ${r.transfers.length ? transfers + `<p class="small muted" style="margin:12px 0 0">„Åbn MobilePay“ forsøger at åbne appen med nummer og beløb udfyldt. MobilePay understøtter ikke dette officielt – sker der ikke noget, så kopiér nummeret og beløbet.</p>` : `<p class="muted" data-t="all-settled">${hasPay ? 'Alt er betalt – ingen skylder noget. 🎉' : 'Alle er kvit – ingen skylder noget. 🎉'}</p>`}
   </div>
+  ${hasPay ? paymentsCard(r, unit) : ''}
   <div class="card"><h2>${hasHh ? 'Pr. husstand' : 'Pr. person'}</h2>
-    <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>${hasHh ? 'Husstand' : 'Navn'}</th><th>Betalt</th><th>Andel</th><th>Saldo</th></tr></thead><tbody>
-    ${r.units.map(u => { const b = r.balance[u.id], l = unitLabel(u); return `<tr data-t="unit-row" data-unit="${esc(u.id)}"><td>${esc(l.name)}${u.id === meUnit ? ' <span class="tag">dig</span>' : ''}${u.household ? `<div class="small muted">${u.members.length} pers.</div>` : ''}</td><td>${formatKr(r.paid[u.id])}</td><td>${formatKr(r.share[u.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
+    <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>${hasHh ? 'Husstand' : 'Navn'}</th><th>Betalt</th><th>Andel</th><th>${hasPay ? 'Rest' : 'Saldo'}</th></tr></thead><tbody>
+    ${r.units.map(u => { const b = r.balance[u.id], l = unitLabel(u); const moved = r.sent[u.id] - r.received[u.id]; return `<tr data-t="unit-row" data-unit="${esc(u.id)}"><td>${esc(l.name)}${u.id === meUnit ? ' <span class="tag">dig</span>' : ''}${u.household ? `<div class="small muted">${u.members.length} pers.</div>` : ''}${moved ? `<div class="small muted" data-t="moved">${moved > 0 ? 'har overført' : 'har modtaget'} ${formatKr(Math.abs(moved))}</div>` : ''}</td><td>${formatKr(r.paid[u.id])}</td><td>${formatKr(r.share[u.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
     </tbody></table>
-    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ og „udvalgte“ er pr. voksen: børn og dem, der har meldt „Kommer ikke“, betaler ikke med. „Pr. husstand“ er lige meget pr. husstand, uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Udgifter med „Ingen“ er ikke med – den, der har betalt, betaler selv. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
+    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ og „udvalgte“ er pr. voksen: børn og dem, der har meldt „Kommer ikke“, betaler ikke med. „Pr. husstand“ er lige meget pr. husstand, uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Udgifter med „Ingen“ er ikke med – den, der har betalt, betaler selv.${hasPay ? ' Registrerede betalinger er trukket fra: „Rest“ er det, der mangler.' : ''} Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
   </div>
   ${costList()}`;
+}
+
+/** Registrerede betalinger med status og knapper. */
+function paymentsCard(r, unit) {
+  const list = [...r.settled].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  return `<div class="card" data-t="payments"><h2>Betalinger</h2><ul class="pays">${list.map(pm => {
+    const fu = unit(pm.from), tu = unit(pm.to), fl = unitLabel(fu), tl = unitLabel(tu);
+    const conf = pm.status === 'confirmed';
+    const canConfirm = !conf && (unitCanAct(tu) || S.admin);
+    const canUndo = (!conf && pm.ownerUid === store.uid) || (conf && (pm.confirmedByUid === store.uid || S.admin));
+    const who = uid => { const p = S.participants.find(x => x.ownerUid === uid); return p ? firstName(p.name) : ''; };
+    return `<li data-t="payment" data-status="${pm.status}"><div class="grow"><b>${esc(fl.name)} → ${esc(tl.name)}</b> <span class="mono">${formatKr(pm.amount)}</span>
+      <div class="small ${conf ? 'ok' : 'wait'}" data-t="payment-status">${conf ? `✔️ Bekræftet modtaget${who(pm.confirmedByUid) ? ' af ' + esc(who(pm.confirmedByUid)) : ''}` : `🕓 Markeret betalt${who(pm.ownerUid) ? ' af ' + esc(who(pm.ownerUid)) : ''} – venter på, at ${esc(tl.name)} bekræfter`}</div>
+      <div class="row-actions">${canConfirm ? `<button class="btn sm green" data-act="pay-confirm" data-id="${pm.id}" data-t="pay-confirm">✔️ Modtaget</button><button class="btn sm ghost" data-act="pay-reject" data-id="${pm.id}" data-t="pay-reject">Ikke modtaget</button>` : ''}
+      ${canUndo && !canConfirm ? `<button class="btn sm ghost" data-act="pay-undo" data-id="${pm.id}" data-t="pay-undo">↩︎ Fortryd</button>` : ''}</div></div></li>`;
+  }).join('')}</ul>
+  <p class="small muted" style="margin:8px 0 0">„Markeret betalt“ tæller med med det samme. Siger modtageren „Ikke modtaget“, forsvinder markeringen, og beløbet mangler igen.</p></div>`;
+}
+
+/** Værtens overblik: hvem mangler at betale, hvad venter på bekræftelse. */
+function hostOverview(r, unit) {
+  if (!r.transfers.length && !r.settled.length) return '';
+  const miss = r.transfers, wait = r.settled.filter(x => x.status !== 'confirmed'), done = r.settled.filter(x => x.status === 'confirmed');
+  const sum = xs => formatKr(xs.reduce((a, x) => a + x.amount, 0));
+  const remindable = miss.filter(t => unit(t.from).members.some(m => m.ownerUid));
+  return `<div class="card host" data-t="host-overview"><h2>👑 Overblik for værten</h2>
+    <div class="bigsum" style="margin-top:8px"><div><b data-t="ov-miss">${miss.length}</b><span>mangler (${sum(miss)})</span></div><div><b data-t="ov-wait">${wait.length}</b><span>venter på bekræftelse</span></div><div><b data-t="ov-done">${done.length}</b><span>bekræftet</span></div></div>
+    ${miss.length ? `<ul class="pays">${miss.map(t => { const fu = unit(t.from), tu = unit(t.to); return `<li data-t="ov-row"><div class="grow"><b>${esc(unitLabel(fu).name)}</b> mangler ${formatKr(t.amount)} <span class="small muted">til ${esc(unitLabel(tu).name)}</span></div>
+      ${fu.members.some(m => m.ownerUid) ? `<button class="btn sm ghost" data-act="pay-remind" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amount="${t.amount}" data-t="ov-remind">🔔</button>` : '<span class="small muted">ingen app</span>'}</li>`; }).join('')}</ul>` : '<p class="muted" style="margin:8px 0 0">Alle har betalt 🎉</p>'}
+    ${remindable.length > 1 ? `<div class="actions"><button class="btn sm" data-act="pay-remind-all" data-t="pay-remind-all">🔔 Send påmindelse til alle, der mangler (${remindable.length})</button></div>` : ''}
+    <p class="small muted" style="margin:8px 0 0">Påmindelser kommer som notifikation hos dem, der har slået notifikationer (og „Betalinger“) til.</p></div>`;
+}
+
+/** "Jeg har betalt" / "Modtaget": registrér en betaling (beløbet kan rettes ved delbetaling). */
+function paySheet(mode, fromId, toId, amount) {
+  const { r } = computeSettlement();
+  const fu = r.units.find(u => u.id === fromId), tu = r.units.find(u => u.id === toId);
+  if (!fu || !tu) return;
+  const fl = unitLabel(fu).name, tl = unitLabel(tu).name;
+  openSheet(mode === 'mark' ? 'Jeg har betalt' : 'Modtaget', `<form id="pay-form" data-mode="${mode}" data-from="${esc(fromId)}" data-to="${esc(toId)}" autocomplete="off">
+    <p style="margin:0"><b>${esc(fl)}</b> → <b>${esc(tl)}</b></p>
+    <p class="small muted" style="margin:4px 0 0">${mode === 'mark' ? `Registrér, at ${fu.household ? 'I' : 'du'} har betalt. ${esc(tl)} får besked og kan bekræfte „Modtaget“.` : `Registrér, at ${esc(tl)} har fået pengene – fx kontant. Så er betalingen bekræftet med det samme.`}</p>
+    <label class="f"><span>Beløb i kr.</span><input type="text" name="amount" inputmode="decimal" value="${esc((amount / 100).toFixed(2).replace('.', ','))}" data-t="pay-amount"></label>
+    <p class="small muted" style="margin:4px 0 0">Er der kun betalt en del, så ret beløbet – resten står stadig som „mangler“.</p>
+    <div class="err"></div>
+    <div class="actions"><button class="btn green" data-t="pay-save">${mode === 'mark' ? '✅ Ja, betalt' : '💰 Ja, modtaget'}</button></div></form>`);
+}
+
+async function sendReminder(fromId, toId, amount, quiet = false) {
+  const { r } = computeSettlement();
+  const fu = r.units.find(u => u.id === fromId), tu = r.units.find(u => u.id === toId);
+  if (!fu || !tu) return false;
+  const to = payeeOf(tu, r);
+  await store.logActivity(S.pid, 'payment', `Påmindelse: ${unitLabel(fu).name} mangler at betale ${formatKr(amount)} til ${firstName(to?.name) || unitLabel(tu).name}${to?.phone ? ' (MobilePay ' + prettyPhone(to.phone) + ')' : ''}`,
+    { participantId: myId() || '', targetPids: unitPids(fu), strict: true });
+  LS.set(remindKey(fromId, toId), Date.now());
+  if (!quiet) toast(`Påmindelse sendt til ${unitLabel(fu).name} 🔔 – den kommer som notifikation, hvis de har slået det til`, 4000);
+  return true;
 }
 
 function shareTab() {
@@ -534,6 +715,11 @@ function helpSheet() {
       <li><b>Ret din tilmelding</b> (navn, telefon, barn, om du kommer) under ⚙️ → „Ret min tilmelding“, eller tryk på dit navn på gæstelisten.</li>
       <li><b>Regnskab:</b> Hver udgift kan deles mellem alle voksne (pr. person), pr. husstand (lige meget hver) eller mellem udvalgte voksne – eller <b>Ingen</b>, hvis du betaler selv: så står prisen på retten, men den er slet ikke med i regnskabet. <b>Børn betaler ikke med</b>, når der deles pr. person, og heller ikke dem, der har meldt „Kommer ikke“. Deles der pr. husstand, betaler husstanden det samme uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
       <li><b>Betal med MobilePay:</b> Ved hver gæld står modtagerens nummer og beløbet, med knapper til at kopiere og til at forsøge at åbne MobilePay.</li>
+      <li><b>Hvem har betalt:</b> Har du betalt, så tryk „✅ Jeg har betalt“ – modtageren får besked og trykker „Modtaget“. Hver overførsel viser ⏳ mangler, 🕓 markeret betalt eller ✔️ bekræftet. Betalinger tæller med i regnskabet, også hvis udgifterne ændres bagefter – så står kun resten tilbage. Modtageren og værten kan sende en påmindelse (🔔) til den, der mangler.</li>
+      <li><b>💡 Det mangler vi:</b> Alle kan foreslå ting, som nogen skal tage med (is, stole, isterninger …). Tryk „Jeg tager den“, så står det på dig – evt. med pris og deling. „Fortryd“ gør det til et forslag igen. Har ingen meldt noget til en ret (fx dessert), står det i programmet.</li>
+      <li><b>🥗 Kost og allergier:</b> Sæt fx vegetar, glutenfri eller nøddeallergi under „Ret min tilmelding“ (også for husstandens børn). Retter kan mærkes med fx „Indeholder nødder“ – så advarer appen diskret, og under 👥 Gæster ses et overblik.</li>
+      <li><b>📅 Tilføj til kalender:</b> Tryk på knappen øverst i gildet for at hente en kalenderfil (iPhone, Android, Outlook) eller åbne Google Kalender.</li>
+      <li><b>♻️ Genbrug en fest:</b> Værten kan under ⚙️ lave en ny fest ud fra en gammel – med sted, retter/programpunkter og husstande. Retter, udgifter, betalinger og svar kopieres ikke. Gæster med egen bruger tilmelder sig selv via det nye link.</li>
     </ol>
     <h3>Godt at vide</h3>
     <ul>
@@ -560,6 +746,7 @@ function partySheet() {
     <label class="f"><span>Sted / adresse</span><input type="text" name="place" maxlength="300" value="${esc(p.place)}"></label>
     <label class="f"><span>Besked til gæsterne</span><textarea name="note" maxlength="2000">${esc(p.note)}</textarea></label>
     <div class="actions"><button class="btn primary">Gem</button></div>
+    <div class="actions"><button type="button" class="btn" data-act="reuse" data-t="reuse-from-edit">♻️ Genbrug til en ny fest</button></div>
     <div class="actions"><button type="button" class="btn danger" data-act="delete-party">🗑️ Slet hele gildet</button></div>
   </form>`);
 }
@@ -579,7 +766,7 @@ function eventSheet(ev, kind = 'ret') {
   </form>`);
 }
 
-function itemSheet(it, eventId = '', kind = 'ret') {
+function itemSheet(it, eventId = '', kind = 'ret', sug = null) {
   const m = me();
   if (!m && !it) { toast('Tilmeld dig først – skriv dit navn og nummer'); S.tab = 'program'; render(); $('#join-form input')?.focus(); scrollTo(0, ($('#join-form')?.offsetTop || 0) - 10); return; }
   kind = it?.kind || kind;
@@ -591,15 +778,16 @@ function itemSheet(it, eventId = '', kind = 'ret') {
   const amongU = new Set(it?.split === 'households' && it.among?.length ? it.among : units.filter(u => u.members.some(p => statusOf(p) !== 'no')).map(u => u.id));
   // Hvem tager det med / har betalt? Mig eller en i min husstand uden egen bruger.
   const whoOpts = !it && m && isMemberOf(m.householdId) ? householdMembers(m.householdId).filter(p => p.id === m.id || unclaimed(p)) : [];
-  openSheet(it ? (isExpense ? 'Ret udgift' : 'Ret bidrag') : (isExpense ? 'Ny udgift' : 'Jeg tager med …'), `<form id="item-form" autocomplete="off" data-id="${it?.id || ''}" data-event="${esc(it?.eventId ?? eventId)}">
+  openSheet(it ? (isExpense ? 'Ret udgift' : 'Ret bidrag') : sug ? `Jeg tager ${sug.title}` : (isExpense ? 'Ny udgift' : 'Jeg tager med …'), `<form id="item-form" autocomplete="off" data-id="${it?.id || ''}" data-event="${esc(it?.eventId ?? eventId)}" data-sug="${sug?.id || ''}">
+    ${sug ? `<p class="small muted" style="margin:0 0 6px" data-t="take-info">💡 Fra forslagene. Når du gemmer, står det på dig og forsvinder fra „Det mangler vi“. Du kan fortryde bagefter.</p>` : ''}
     ${ev ? `<p class="muted small" style="margin:0 0 4px">Til: <b>${eventIcon(ev)} ${esc(ev.title)}</b></p>` : ''}
     ${it && it.participantId !== myId() ? `<p class="muted small" style="margin:0 0 4px">Tilhører: <b>${esc(pName(it.participantId))}</b></p>` : ''}
     ${whoOpts.length > 1 ? `<label class="f"><span>${isExpense ? 'Hvem har betalt?' : 'Hvem tager det med?'}</span><select name="who" data-t="item-who">${whoOpts.map(p => `<option value="${p.id}" ${p.id === m.id ? 'selected' : ''}>${esc(p.name)}${p.id === m.id ? ' (mig)' : ''}</option>`).join('')}</select></label>` : ''}
     ${!isExpense ? `<div class="seg" data-seg="kind">${['ret', 'aktivitet', 'andet'].map(k => `<button type="button" data-v="${k}" class="${kind === k ? 'on' : ''}">${ITEM_KINDS[k][0]} ${ITEM_KINDS[k][1]}</button>`).join('')}</div>` : ''}
     <input type="hidden" name="kind" value="${kind}">
-    <label class="f"><span>${isExpense ? 'Hvad er udgiften? *' : 'Hvad tager du med? *'}</span><input type="text" name="title" maxlength="100" required value="${esc(it?.title || '')}" placeholder="${isExpense ? 'F.eks. Vin og øl' : 'F.eks. Lasagne'}"></label>
+    <label class="f"><span>${isExpense ? 'Hvad er udgiften? *' : 'Hvad tager du med? *'}</span><input type="text" name="title" maxlength="100" required value="${esc(it?.title || sug?.title || '')}" placeholder="${isExpense ? 'F.eks. Vin og øl' : 'F.eks. Lasagne'}"></label>
     ${!isExpense ? `<label class="f"><span>Til hvor mange personer?</span><input type="number" name="servings" min="0" max="1000" inputmode="numeric" value="${it?.servings || ''}" placeholder="${S.participants.length || ''}"></label>` : ''}
-    <label class="f"><span>Note (valgfri)</span><input type="text" name="note" maxlength="500" value="${esc(it?.note || '')}" placeholder="${isExpense ? 'F.eks. købt i Netto' : 'F.eks. vegetarisk, indeholder nødder'}"></label>
+    <label class="f"><span>Note (valgfri)</span><input type="text" name="note" maxlength="500" value="${esc(it?.note || sug?.note || '')}" placeholder="${isExpense ? 'F.eks. købt i Netto' : 'F.eks. vegetarisk, indeholder nødder'}"></label>
     <label class="f"><span>${isExpense ? 'Beløb i kr. *' : 'Udgift i kr. (valgfri)'}</span><input type="text" name="cost" inputmode="decimal" value="${it?.cost ? esc((it.cost / 100).toFixed(2).replace('.', ',')) : ''}" placeholder="F.eks. 149,95"></label>
     <div id="split-box" style="${it?.cost || isExpense ? '' : 'display:none'}">
       <label class="f"><span>Hvem skal dele udgiften?</span></label>
@@ -614,8 +802,9 @@ function itemSheet(it, eventId = '', kind = 'ret') {
         ${units.map(u => `<label><input type="checkbox" name="amongHh" value="${esc(u.id)}" ${amongU.has(u.id) ? 'checked' : ''}> ${u.household ? '🏠 ' : ''}${esc(unitLabel(u).name)} <span class="small muted">(${u.members.length} pers.)</span></label>`).join('')}
       </div>
     </div>
+    ${!isExpense ? dishTagBox(it) : ''}
     <div class="err"></div>
-    <div class="actions"><button class="btn primary" data-t="save-item">${it ? 'Gem' : 'Tilføj'}</button></div>
+    <div class="actions"><button class="btn primary" data-t="save-item">${it ? 'Gem' : sug ? '✋ Jeg tager den' : 'Tilføj'}</button></div>
     ${it ? `<div class="actions"><button type="button" class="btn danger" data-act="delete-item" data-id="${it.id}">🗑️ Slet</button></div>` : ''}
   </form>`, sheet => {
     const cost = $('[name=cost]', sheet);
@@ -629,6 +818,74 @@ const SPLIT_HELP = {
   selected: 'Deles lige mellem de voksne, du vælger. Børn betaler ikke med.',
   none: 'Deles ikke: prisen står på retten, men kommer ikke med i regnskabet. Den, der har betalt, betaler selv, og ingen skylder noget for den.',
 };
+
+// ── Kalender ─────────────────────────────────────────────────────────────
+function calendarSheet() {
+  const p = { ...S.party, id: S.pid };
+  const g = googleCalendarUrl(p, partyUrl(S.pid));
+  openSheet('Tilføj til kalender', `<p class="small muted" style="margin:0">Få ${esc(p.name)} ind i din kalender – med tid, sted og link til gildet.</p>
+    <div class="actions"><button class="btn primary" data-act="ics" data-t="ics">📥 Hent kalenderfil</button></div>
+    ${g ? `<div class="actions"><a class="btn" href="${esc(g)}" target="_blank" rel="noopener" data-t="gcal">🗓️ Åbn i Google Kalender</a></div>` : ''}
+    <div class="guide small" style="margin-top:12px">
+      <p><b>🍎 iPhone:</b> Tryk „Hent kalenderfil“ og vælg <b>Tilføj alle</b> (eller åbn filen fra Overførsler).</p>
+      <p><b>🤖 Android:</b> Åbn den hentede fil med din kalender-app – eller brug Google Kalender-knappen.</p>
+      <p><b>💻 Computer:</b> Filen virker også i Outlook og Apple Kalender.</p>
+      ${p.time ? `<p class="muted">Begivenheden varer ${4} timer fra kl. ${esc(p.time)} – ret det bagefter i kalenderen, hvis det passer bedre.</p>` : '<p class="muted">Gildet har intet tidspunkt, så det bliver en heldagsbegivenhed.</p>'}
+      <p class="muted">Ændrer værten dato eller tid senere, skal du tilføje det igen.</p>
+    </div>`);
+}
+function downloadIcs() {
+  let ics;
+  try { ics = buildIcs({ ...S.party, id: S.pid }, partyUrl(S.pid)); } catch { toast('Gildet har ingen dato endnu'); return; }
+  if (isIOSDevice) { location.href = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(ics); return; }   // iPhone: åbner „Tilføj til kalender“
+  const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = icsFileName(S.party); document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  toast('Kalenderfilen er hentet – åbn den for at tilføje gildet 📅', 3500);
+}
+
+// ── Genbrug en fest ──────────────────────────────────────────────────────
+function reuseSheet() {
+  if (!S.admin) return;
+  const p = S.party, m = me();
+  const hhN = S.households.filter(h => S.participants.some(x => x.householdId === h.id)).length;
+  const freeN = S.participants.filter(x => !x.ownerUid).length;
+  const userN = S.participants.filter(x => x.ownerUid && x.id !== m?.id).length;
+  openSheet('Genbrug til en ny fest', `<form id="reuse-form" autocomplete="off">
+    <p class="small muted" style="margin:0">Laver en <b>ny</b> fest ud fra „${esc(p.name)}“. Den gamle fest røres ikke.</p>
+    <label class="f"><span>Navn på den nye fest *</span><input type="text" name="name" maxlength="120" required value="${esc(p.name)}"></label>
+    <div class="two"><label class="f"><span>Dato</span><input type="date" name="date"></label>
+    <label class="f"><span>Tidspunkt</span><input type="time" name="time" value="${esc(p.time || '')}"></label></div>
+    <label class="f"><span>Sted / adresse</span><input type="text" name="place" maxlength="300" value="${esc(p.place || '')}"></label>
+    <label class="f"><span>Besked til gæsterne</span><textarea name="note" maxlength="2000">${esc(p.note || '')}</textarea></label>
+    <label class="f"><span>Hvad skal med?</span></label>
+    <div class="checks" style="max-height:none">
+      <label><input type="checkbox" name="events" ${S.events.length ? 'checked' : 'disabled'} data-t="reuse-events"> 🍽️ Retter og programpunkter (${S.events.length})</label>
+      <label><input type="checkbox" name="households" ${hhN || freeN ? 'checked' : 'disabled'} data-t="reuse-households"> 🏠 Husstande og personer uden egen bruger (${hhN} husstande, ${freeN} personer)</label>
+      <label><input type="checkbox" name="placeholders" ${userN ? '' : 'disabled'} data-t="reuse-placeholders"> 👥 Gæster med egen bruger som pladsholdere (${userN}) – kun navn, de trykker selv „Det er mig“</label>
+      ${m && m.ownerUid === store.uid ? `<label><input type="checkbox" name="me" checked data-t="reuse-me"> 🙋 Skriv mig (${esc(m.name)}) på som gæst</label>` : ''}
+    </div>
+    <div class="guide small" style="margin-top:10px" data-t="reuse-help">
+      <p><b>Kopieres ikke:</b> retter/bidrag, udgifter, betalinger, forslag og svar (kommer/kommer ikke). Kopierede personer står som „🤔 Kommer måske“, indtil de selv eller husstanden svarer.</p>
+      <p><b>Gæster med egen bruger</b> kan ikke tilmeldes af andre. Del det nye link – så tilmelder de sig selv, eller trykker „Det er mig“ ved deres navn, hvis du har valgt pladsholdere.</p>
+    </div>
+    <div class="err"></div>
+    <div class="actions"><button class="btn primary" data-t="reuse-save">♻️ Opret den nye fest</button></div></form>`);
+}
+
+// ── Forslag: ark ─────────────────────────────────────────────────────────
+function suggestionSheet(eventId = '') {
+  if (!me()) { toast('Tilmeld dig først – skriv dit navn og nummer'); S.tab = 'program'; closeSheet(); render(); scrollTo(0, ($('#join-form')?.offsetTop || 0) - 10); return; }
+  const evs = sortedEvents();
+  openSheet('Foreslå noget', `<form id="suggestion-form" autocomplete="off">
+    <p class="small muted" style="margin:0">Noget, som nogen skal tage med – fx is, stole, isterninger eller en dessert. Alle kan se forslaget og trykke „Jeg tager den“.</p>
+    <label class="f"><span>Hvad mangler vi? *</span><input type="text" name="title" maxlength="100" required placeholder="F.eks. Isterninger"></label>
+    <div class="chips" style="margin-top:8px">${['Is', 'Isterninger', 'Stole', 'Dessert', 'Brød', 'Salat', 'Sodavand'].map(x => `<button type="button" class="chip" data-act="fill-sug" data-v="${x}">${x}</button>`).join('')}</div>
+    ${evs.length ? `<label class="f"><span>Til (valgfrit)</span><select name="eventId" data-t="sug-event"><option value="">Ikke noget bestemt</option>${evs.map(e => `<option value="${e.id}" ${e.id === eventId ? 'selected' : ''}>${esc(e.title)}</option>`).join('')}</select></label>` : '<input type="hidden" name="eventId" value="">'}
+    <label class="f"><span>Note (valgfri)</span><input type="text" name="note" maxlength="200" placeholder="F.eks. til 20 personer"></label>
+    <div class="err"></div>
+    <div class="actions"><button class="btn primary" data-t="save-suggestion">💡 Foreslå</button></div></form>`);
+}
 
 // ── Husstande: ark ───────────────────────────────────────────────────────
 function householdSheet() {
@@ -658,6 +915,7 @@ function personSheet(hid, p) {
     <label class="f"><span>Navn *</span><input type="text" name="name" maxlength="60" required value="${esc(p?.name || '')}" placeholder="F.eks. Sofie"></label>
     <label class="f"><span>Telefonnummer (valgfrit)</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(p?.phone || '')}" placeholder="12 34 56 78"></label>
     ${canChild ? childBox('Barn', !!p?.isChild) : ''}
+    ${dietBox(p, 'person-diet')}
     <label class="f"><span>Kommer ${p ? esc(firstName(p.name)) : 'personen'}?</span></label>
     <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="person-status-${k}">${ic} ${l}</button>`).join('')}</div>
     <input type="hidden" name="status" value="${st}">
@@ -688,6 +946,7 @@ function meSheet(edit) {
     openSheet('Ret min tilmelding', `<form id="me-form" autocomplete="on"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required value="${esc(m.name)}"></label>
       <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(m.phone)}" placeholder="12 34 56 78"></label>
       ${childBox('Jeg er barn', !!m.isChild, 'me-child')}
+      ${dietBox(m, 'me-diet')}
       ${hhOn() ? `<label class="f"><span>Kommer du?</span></label>
       <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="me-status-${k}">${ic} ${l}</button>`).join('')}</div>
       <input type="hidden" name="status" value="${st}">` : ''}
@@ -704,6 +963,17 @@ function meSheet(edit) {
     ${childBox('Jeg er barn', false, 'switch-child')}<div class="err"></div>
     <div class="actions"><button class="btn primary" data-t="switch-join">Tilmeld ny person</button></div></form>
     <div class="actions"><button class="btn ghost" data-act="be" data-id="">Bare kig med (ikke tilmeldt)</button></div>`);
+}
+
+function afterReuse(info) {
+  S.tab = 'program'; render();
+  const n = (k, now) => info[k] ?? now, ev = n('events', S.events.length), hh = n('households', S.households.length), ppl = n('people', S.participants.filter(p => !p.ownerUid).length);
+  openSheet('Den nye fest er klar ♻️', `<p style="margin:0">Kopieret fra „${esc(info.from)}“: ${ev} ${ev === 1 ? 'ret/programpunkt' : 'retter/programpunkter'}, ${hh} ${hh === 1 ? 'husstand' : 'husstande'} og ${ppl} ${ppl === 1 ? 'person' : 'personer'} uden egen bruger${ppl ? ' (står som „kommer måske“)' : ''}.</p>
+    <p class="small muted">Send det nye link til gæsterne. De tilmelder sig selv – eller trykker „Det er mig“ ved deres navn.</p>
+    <div class="linkbox" data-t="reuse-link">${esc(partyUrl(S.pid))}</div>
+    <div class="actions"><button class="btn primary" data-act="share">📤 Del link</button><button class="btn" data-act="copy" data-text="${esc(partyUrl(S.pid))}" data-msg="Linket er kopieret">📋 Kopiér</button></div>
+    ${!S.party.date ? '<p class="small muted">Husk at sætte en dato under ✏️ Ret gildet.</p>' : ''}
+    <div class="actions"><button class="btn green" data-act="close-sheet" data-t="reuse-continue">Videre</button></div>`);
 }
 
 async function afterCreate() {
@@ -786,10 +1056,13 @@ function partySettingsHtml() {
   const m = me(), token = S.admin && store.creatorToken(S.pid);
   const st = statusOf(m);
   const you = m ? `<div class="me" style="margin:6px 0 0">${avatar(m)}<div class="grow"><b>${esc(m.name)}</b>${m.isChild ? ' <span class="tag kid">barn</span>' : ''}<div class="small muted">${m.phone ? esc(prettyPhone(m.phone)) : 'Intet nummer'}${hhOn() ? ` · ${STATUS[st][0]} ${STATUS[st][1]}` : ''}</div></div></div>
-      ${m.ownerUid === store.uid ? '<button class="btn primary block" style="margin-top:10px" data-act="edit-me" data-t="settings-edit-me">✏️ Ret min tilmelding</button><p class="small muted" style="margin:6px 0 0">Navn, telefon, om du er barn, og om du kommer.</p>' : ''}
+      ${m.ownerUid === store.uid ? '<button class="btn primary block" style="margin-top:10px" data-act="edit-me" data-t="settings-edit-me">✏️ Ret min tilmelding</button><p class="small muted" style="margin:6px 0 0">Navn, telefon, om du er barn, kost/allergier, og om du kommer.</p>' : ''}
       <div class="row-actions"><button class="btn sm ghost" data-act="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div>`
     : `<p class="small muted">Du er ikke tilmeldt dette gilde endnu.</p><button class="btn sm primary" data-act="close-sheet">Tilmeld mig</button>`;
   return `<section class="set"><h3>👤 Dig i dette gilde</h3>${you}</section>
+    ${S.admin ? `<section class="set" data-t="reuse-section"><h3>♻️ Genbrug til en ny fest</h3>
+      <p class="small muted">Lav en ny fest med samme sted, retter/programpunkter og husstande – fx næste års julefrokost.</p>
+      <button class="btn sm" data-act="reuse" data-t="reuse">♻️ Genbrug festen</button></section>` : ''}
     <section class="set" data-t="notif-section"><h3>🔔 Notifikationer</h3>${notifHtml()}</section>
     <section class="set"><h3>🧹 Andet</h3><div class="row-actions" style="margin-top:4px">
       ${token ? `<button class="btn sm" data-act="copy" data-text="${esc(adminUrl(S.pid, token))}" data-msg="Værts-linket er kopieret – gem det et sikkert sted">👑 Kopiér værts-link</button>` : ''}
@@ -840,6 +1113,15 @@ function subPrefsFrom(sub) {
   return { topics: { ...DEFAULT_TOPICS, ...(sub?.topics || {}) }, frequency: sub?.frequency || 'instant',
     digestHour: Number.isInteger(sub?.digestHour) ? sub.digestHour : 18, reminderBefore: sub?.reminderBefore === '3h' ? '3h' : '1d' };
 }
+/** Gem abonnement. Afviser (ældre) regler emnet „payments“, gemmes uden – notifieren regner et manglende emne som „til“. */
+async function saveSubSafe(data, isNew) {
+  try { return await store.saveSub(S.pid, data, isNew); }
+  catch (e) {
+    if (!/permission|insufficient/i.test(e.code + ' ' + e.message) || !data.topics || !('payments' in data.topics)) throw e;
+    const { payments, ...topics } = data.topics;
+    return store.saveSub(S.pid, { ...data, topics }, isNew);
+  }
+}
 async function toggleNotifications() {
   const sub = settingsState.sub;
   const on = !!(sub?.enabled && sub.channels?.push);
@@ -852,7 +1134,7 @@ async function toggleNotifications() {
       const push = await subscribePush();
       const data = { enabled: true, participantId: myId() || '', tz: 'Europe/Copenhagen', channels: { push: { ...push, ua: deviceLabel() } },
         ...subPrefsFrom(sub), baselineAt: store.ts() };
-      await store.saveSub(S.pid, data, !sub);
+      await saveSubSafe(data, !sub);
       settingsState.sub = { ...(sub || {}), ...data }; toast('Notifikationer er slået til 🔔');
     }
   } catch (e) {
@@ -871,7 +1153,7 @@ async function saveNotifPrefs(form) {
   const upd = { topics, frequency, digestHour: form.digestHour ? Number(form.digestHour.value) : subPrefsFrom(sub).digestHour,
     reminderBefore: form.reminderBefore ? form.reminderBefore.value : subPrefsFrom(sub).reminderBefore };
   if (frequency !== sub.frequency) upd.baselineAt = store.ts();   // ingen gammel ophobning ved skift
-  try { await store.saveSub(S.pid, upd); settingsState.sub = { ...sub, ...upd }; settingsState.msg = 'Gemt ✓'; renderSettings(); }
+  try { await saveSubSafe(upd); settingsState.sub = { ...sub, ...upd }; settingsState.msg = 'Gemt ✓'; renderSettings(); }
   catch (e) { fail(e); }
 }
 async function testNotification() {
@@ -903,7 +1185,9 @@ async function register(form) {
   const btn = $('button:not([type=button])', form); btn.disabled = true;
   try {
     const child = !!form.isChild?.checked;
-    const id = await store.add(S.pid, 'participants', { name: p.name, phone: p.phone, ...(child ? { isChild: true } : {}) });
+    const d = form.querySelector('[name=diet]') ? readDiet(form) : { diet: [], dietNote: '' };
+    const id = await store.add(S.pid, 'participants', { name: p.name, phone: p.phone, ...(child ? { isChild: true } : {}),
+      ...(d.diet.length ? { diet: d.diet } : {}), ...(d.dietNote ? { dietNote: d.dietNote } : {}) });
     LS.set(meKey(S.pid), id); if (!child) LS.set('sg:profile', { name: p.name, phone: p.phone });
     store.logActivity(S.pid, 'guest', `${p.name} er tilmeldt${child ? ' (barn)' : ''}`, { participantId: id });
     syncSubParticipant();
@@ -979,6 +1263,41 @@ async function removePerson(p) {
   } catch (e) { fail(e); }
 }
 
+async function paymentAction(act, pm) {
+  if (!pm) return;
+  const { r } = computeSettlement();
+  const e = r.settled.find(x => x.id === pm.id);
+  const fu = e && r.units.find(u => u.id === e.from), tu = e && r.units.find(u => u.id === e.to);
+  const amt = formatKr(pm.amount), myName = me()?.name || 'Værten';
+  try {
+    if (act === 'pay-confirm') {
+      await store.confirmPayment(S.pid, pm.id);
+      store.logActivity(S.pid, 'payment', `${myName} har bekræftet at have modtaget ${amt}${fu ? ' fra ' + unitLabel(fu).name : ''} ✔️`, { participantId: myId() || '', targetPids: unitPids(fu) });
+      toast('Bekræftet – tak! ✔️');
+    } else if (act === 'pay-reject') {
+      if (!confirm(`Har ${tu ? unitLabel(tu).name : 'I'} ikke modtaget ${amt}? Markeringen fjernes, og beløbet står som „mangler“ igen.`)) return;
+      await store.remove(S.pid, 'payments', pm.id);
+      store.logActivity(S.pid, 'payment', `${myName} har ikke modtaget ${amt}${fu ? ' fra ' + unitLabel(fu).name : ''} – tjek betalingen`, { participantId: myId() || '', targetPids: unitPids(fu) });
+      toast('Markeringen er fjernet');
+    } else {
+      if (!confirm(`Fortryd betalingen på ${amt}?`)) return;
+      await store.remove(S.pid, 'payments', pm.id);
+      toast('Betalingen er fortrudt');
+    }
+  } catch (err) { fail(err); }
+}
+
+async function untakeSuggestion(x) {
+  if (!x) return;
+  const it = S.items.find(i => i.id === x.takenItemId);
+  if (!confirm(`Fortryd „${x.title}“? Det bliver et forslag igen${it ? ', og det, der står på ' + firstName(pName(it.participantId)) + ', slettes' : ''}.`)) return;
+  try {
+    await store.untakeSuggestion(S.pid, x.id, it && canEditItem(it) ? it.id : null);
+    store.logActivity(S.pid, 'item', `${x.title} er et forslag igen – hvem tager den?`, { participantId: myId() || '' });
+    closeSheet(); toast(`${x.title} er et forslag igen`);
+  } catch (e) { fail(e); }
+}
+
 async function onClick(e) {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act, id = el.dataset.id;
@@ -1001,10 +1320,29 @@ async function onClick(e) {
       return;
     }
     case 'edit-party': return partySheet();
+    case 'calendar': return calendarSheet();
+    case 'ics': return downloadIcs();
+    case 'reuse': return reuseSheet();
+    case 'pay-mark': return paySheet('mark', el.dataset.from, el.dataset.to, Number(el.dataset.amount));
+    case 'pay-receive': return paySheet('receive', el.dataset.from, el.dataset.to, Number(el.dataset.amount));
+    case 'pay-remind': {
+      const last = LS.get(remindKey(el.dataset.from, el.dataset.to));
+      if (last && Date.now() - last < 10 * 60000 && !confirm(`Du sendte en påmindelse kl. ${hhmm(last)}. Send en til?`)) return;
+      try { await sendReminder(el.dataset.from, el.dataset.to, Number(el.dataset.amount)); render(); } catch (err) { fail(err); }
+      return;
+    }
+    case 'pay-remind-all': {
+      const { r } = computeSettlement();
+      const list = r.transfers.filter(t => r.units.find(u => u.id === t.from)?.members.some(m => m.ownerUid));
+      if (!confirm(`Send påmindelse til ${list.length} husstande/gæster, der mangler at betale?`)) return;
+      try { for (const t of list) await sendReminder(t.from, t.to, t.amount, true); toast(`Påmindelse sendt til ${list.length} 🔔`, 3500); render(); } catch (err) { fail(err); }
+      return;
+    }
+    case 'pay-confirm': case 'pay-reject': case 'pay-undo': return paymentAction(act, S.payments.find(x => x.id === id));
     case 'delete-party':
       if (!confirm(`Slet "${S.party.name}" med alle retter, gæster og udgifter? Det kan ikke fortrydes.`)) return;
       try {
-        const lists = { events: S.events, participants: S.participants, items: S.items, households: S.households }, pid = S.pid;
+        const lists = { events: S.events, participants: S.participants, items: S.items, households: S.households, suggestions: S.suggestions, payments: S.payments }, pid = S.pid;
         stopWatching(); closeSheet();
         await store.deleteParty(pid, lists);
         LS.set('sg:parties', LS.get('sg:parties', []).filter(p => p.id !== pid)); LS.del(meKey(pid));
@@ -1030,11 +1368,32 @@ async function onClick(e) {
       return;
     }
     case 'new-item': return itemSheet(null, el.dataset.event || '', el.dataset.kind || 'ret');
-    case 'edit-item': return itemSheet(S.items.find(x => x.id === id));
-    case 'delete-item':
-      if (!confirm('Slet denne post?')) return;
-      try { await store.remove(S.pid, 'items', id); closeSheet(); toast('Slettet'); } catch (err) { fail(err); }
+    case 'new-suggestion': return suggestionSheet(el.dataset.event || '');
+    case 'fill-sug': $('#suggestion-form').title.value = el.dataset.v; return;
+    case 'take-suggestion': {
+      const x = sugById(id); if (!x) return;
+      if (isTaken(x, S.items)) { toast('Den er allerede taget'); return; }
+      return itemSheet(null, x.eventId && S.events.some(e => e.id === x.eventId) ? x.eventId : '', 'ret', x);
+    }
+    case 'untake-suggestion': return untakeSuggestion(sugById(id));
+    case 'delete-suggestion': {
+      const x = sugById(id); if (!x) return;
+      if (!confirm(`Slet forslaget „${x.title}“?`)) return;
+      try { await store.remove(S.pid, 'suggestions', id); toast('Forslaget er slettet'); } catch (err) { fail(err); }
       return;
+    }
+    case 'edit-item': return itemSheet(S.items.find(x => x.id === id));
+    case 'delete-item': {
+      if (!confirm('Slet denne post?')) return;
+      const it = S.items.find(x => x.id === id), x = it?.suggestionId && sugById(it.suggestionId);
+      try {
+        // Kom retten fra et forslag, bliver forslaget ledigt igen
+        if (x && x.takenItemId === id && (x.takenByUid === store.uid || S.admin)) await store.untakeSuggestion(S.pid, x.id, id);
+        else await store.remove(S.pid, 'items', id);
+        closeSheet(); toast(x ? 'Slettet – det er et forslag igen' : 'Slettet');
+      } catch (err) { fail(err); }
+      return;
+    }
     case 'edit-me': return meSheet(true);
     case 'not-me': return meSheet(false);
     case 'be': if (id) LS.set(meKey(S.pid), id); else LS.del(meKey(S.pid)); syncSubParticipant(); closeSheet(); render(); if (id) toast(`Hej ${pName(id)}!`); return;
@@ -1114,12 +1473,12 @@ async function onSubmit(e) {
       const who = me()?.name || 'Værten';
       if (f.dataset.id) {
         const old = pById(f.dataset.id);
-        await store.update(S.pid, 'participants', f.dataset.id, { name, phone, status, ...(isChild !== undefined ? { isChild } : {}) });
+        await store.update(S.pid, 'participants', f.dataset.id, { name, phone, status, ...(isChild !== undefined ? { isChild } : {}), ...dietUpd(f, old) });
         if (old && statusOf(old) !== status) store.logActivity(S.pid, 'guest', f.dataset.id === myId() ? statusText(name, status) : `${statusText(name, status)} (meldt af ${firstName(who)})`, { participantId: myId() || '' });
         closeSheet(); toast('Gemt');
       } else {
         const h = hhById(f.dataset.hid);
-        await store.addMember(S.pid, f.dataset.hid, { name, phone, isChild: !!isChild, status });
+        await store.addMember(S.pid, f.dataset.hid, { name, phone, isChild: !!isChild, status, ...readDiet(f) });
         store.logActivity(S.pid, 'guest', `${firstName(who)} har tilføjet ${name}${isChild ? ' (barn)' : ''} til ${h?.name || 'husstanden'}${status !== 'yes' ? ' – ' + STATUS[status][2] : ''}`, { participantId: myId() || '' });
         closeSheet(); toast(`${name} er tilføjet`);
       }
@@ -1146,7 +1505,7 @@ async function onSubmit(e) {
     const p = readPerson(f); if (p.err) return err(p.err);
     const m = me(); if (!m) return err('Du er ikke tilmeldt.');
     const isChild = !!f.isChild?.checked, status = f.status ? f.status.value : statusOf(m);
-    const upd = { ...p, isChild, ...(f.status ? { status } : {}) };
+    const upd = { ...p, isChild, ...(f.status ? { status } : {}), ...dietUpd(f, m) };
     return busy(async () => {
       await store.update(S.pid, 'participants', m.id, upd);
       if (!isChild) LS.set('sg:profile', p);
@@ -1179,6 +1538,45 @@ async function onSubmit(e) {
       closeSheet(); toast(f.dataset.id ? 'Gemt' : `${title} er tilføjet`);
     });
   }
+  if (f.id === 'pay-form') {
+    const amount = parseKr(f.amount.value);
+    if (!amount) return err('Skriv beløbet, f.eks. 150,00');
+    const { r } = computeSettlement();
+    const fu = r.units.find(u => u.id === f.dataset.from), tu = r.units.find(u => u.id === f.dataset.to);
+    if (!fu || !tu) return err('Regnskabet er ændret – luk og prøv igen.');
+    const confirmed = f.dataset.mode === 'receive';
+    return busy(async () => {
+      const to = payeeOf(tu, r);
+      await store.addPayment(S.pid, { fromUnit: fu.id, toUnit: tu.id, fromPid: payerOf(fu)?.id, toPid: to?.id, amount }, confirmed);
+      const myName = me()?.name || 'Værten';
+      store.logActivity(S.pid, 'payment', confirmed ? `${myName} har registreret, at ${unitLabel(tu).name} har modtaget ${formatKr(amount)} fra ${unitLabel(fu).name} ✔️`
+        : `${myName} har betalt ${formatKr(amount)} til ${unitLabel(tu).name} – bekræft, når pengene er modtaget`,
+        { participantId: myId() || '', targetPids: unitPids(confirmed ? fu : tu) });
+      closeSheet(); toast(confirmed ? 'Registreret som modtaget ✔️' : `Markeret som betalt ✅ ${unitLabel(tu).name} får besked`, 3500);
+    });
+  }
+  if (f.id === 'reuse-form') {
+    const name = f.name.value.trim(); if (!name) return err('Giv den nye fest et navn.');
+    return busy(async () => {
+      const src = { events: sortedEvents(), households: S.households, participants: sortedPeople() };
+      const m = me();
+      const res = await store.copyParty(src, { fields: { name, date: f.date.value, time: f.time.value, place: f.place.value.trim(), note: f.note.value.trim() },
+        events: !!f.events?.checked, households: !!f.households?.checked, placeholders: !!f.placeholders?.checked, me: f.me?.checked && m?.ownerUid === store.uid ? m : null });
+      if (res.myPid) LS.set(meKey(res.id), res.myPid);
+      S.justReused = { from: S.party.name, ...res.counts };
+      closeSheet(); location.hash = '#/p/' + res.id; toast('Den nye fest er oprettet ♻️');
+    });
+  }
+  if (f.id === 'suggestion-form') {
+    const title = f.title.value.trim(); if (!title) return err('Skriv hvad der mangler.');
+    const eventId = f.eventId?.value || '', note = f.note.value.trim();
+    return busy(async () => {
+      await store.add(S.pid, 'suggestions', { title, eventId, note, byPid: myId() || '' });
+      const ev = S.events.find(x => x.id === eventId);
+      store.logActivity(S.pid, 'item', `${me()?.name || 'En gæst'} foreslår: ${title}${ev ? ' (til ' + ev.title.toLowerCase() + ')' : ''} – hvem tager den?`, { participantId: myId() || '' });
+      closeSheet(); toast('Forslaget er tilføjet 💡');
+    });
+  }
   if (f.id === 'item-form') {
     const title = f.title.value.trim(); if (!title) return err('Skriv hvad det er.');
     const kind = f.kind.value;
@@ -1197,6 +1595,10 @@ async function onSubmit(e) {
     if (cost && split === 'selected' && !among.length) return err('Vælg mindst én voksen – børn betaler ikke med ved deling pr. person.');
     const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost && split !== 'none' ? among : [] };
     const unsharedNow = cost > 0 && split === 'none';
+    // Mærker: kun skrevet, når der er nogen (eller de fjernes) – så nye poster også virker med ældre regler
+    const tags = $$('input[name=tags]:checked', f).map(x => x.value);
+    const oldIt = f.dataset.id && S.items.find(x => x.id === f.dataset.id);
+    if (kind !== 'udgift' && (tags.length || cleanTags(oldIt?.tags, DISH_TAGS).length)) data.tags = cleanTags(tags, DISH_TAGS);
     return busy(async () => {
       const who = (f.who && f.who.value !== myId() ? pName(f.who.value) : me()?.name) || 'Nogen';
       if (f.dataset.id) {
@@ -1209,6 +1611,14 @@ async function onSubmit(e) {
             : `${pName(old.participantId)}: udgiften for ${title} er nu ${formatKr(cost)}`;
           store.logActivity(S.pid, 'cost', t, { participantId: myId() || '' });
         }
+      } else if (f.dataset.sug) {
+        const sug = sugById(f.dataset.sug);
+        if (!sug || isTaken(sug, S.items)) { closeSheet(); toast('Nogen har lige taget den 🙂', 3000); return; }
+        const forId = f.who?.value || myId();
+        try { await store.takeSuggestion(S.pid, sug.id, { ...data, eventId: f.dataset.event || '', participantId: forId }, forId); }
+        catch (x) { if (x?.code === 'permission-denied') { closeSheet(); toast('Nogen har lige taget den 🙂', 3000); return; } throw x; }
+        store.logActivity(S.pid, 'item', `${who} tager ${title} med (fra forslagene)${cost ? ' (' + formatKr(cost) + (unsharedNow ? ', betaler selv' : '') + ')' : ''}`, { participantId: myId() || '', hasCost: cost > 0 && !unsharedNow });
+        closeSheet(); toast(`Tak! ${title} står nu på ${forId === myId() ? 'dig' : firstName(pName(forId))} 🙌`); return;
       } else {
         const forId = f.who?.value || myId();
         await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: forId });
