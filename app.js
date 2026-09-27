@@ -1,6 +1,11 @@
 import { createStore } from './data.js';
 import { settle, parseKr, formatKr } from './settle.js';
 import { cleanPhone, prettyPhone, mobilepayPhone, isValidPhone } from './util.js';
+import { pushSupport, subscribePush, localNotification, registerServiceWorker, isIOS as isIOSDevice, isStandalone, deviceLabel } from './push.js';
+
+const APP_VERSION = '1.1';
+const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
+const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['reminder', '⏰ Påmindelse før festen']];
 
 // ───────────────────────────── Hjælpere ─────────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -87,10 +92,11 @@ function rememberParty() {
 // ───────────────────────────── Routing ─────────────────────────────
 async function route() {
   const h = location.hash.replace(/^#\/?/, '');
-  const m = h.match(/^p\/([A-Za-z0-9]{20,40})(?:\/admin\/([0-9a-f]{64}))?$/);
+  const m = h.match(/^p\/([A-Za-z0-9]{20,40})(?:\/admin\/([0-9a-f]{64})|\/mig\/([A-Za-z0-9]{10,40}))?$/);
   closeSheet();
   if (!m) { stopWatching(); S.view = 'home'; S.pid = null; render(); return; }
-  const [, pid, token] = m;
+  const [, pid, token, meId] = m;
+  if (meId) { LS.set(meKey(pid), meId); history.replaceState(null, '', '#/p/' + pid); }
   if (token) sessionStorage.setItem('sg:pendingAdmin', JSON.stringify({ pid, token }));
   if (token) { history.replaceState(null, '', '#/p/' + pid); }
   if (S.pid !== pid) startWatching(pid);
@@ -147,6 +153,7 @@ function topbar(back) {
     ${back ? `<a class="iconbtn" href="#/" aria-label="Til forsiden" data-t="home">←</a>` : ''}
     <a class="brand" href="#/"><img src="icon-192.png" alt=""><b>Sammen<span>skud</span>sgilde</b></a>
     <button class="iconbtn" data-act="help" aria-label="Sådan virker det">?</button>
+    <button class="iconbtn" data-act="settings" data-t="settings" aria-label="Indstillinger">⚙️</button>
   </div>`;
 }
 function demoBanner() {
@@ -181,6 +188,11 @@ function homeView() {
     <div class="err" id="create-err"></div>
     <button class="btn primary block" style="margin-top:14px" data-t="create">Opret gilde</button>
   </form>
+  ${isStandalone() || isIOSDevice ? `<div class="card" data-t="paste-card"><h3>🔗 Har du fået et link til et gilde?</h3>
+    <p class="small muted" style="margin:4px 0 8px">Indsæt det her for at åbne gildet i appen.</p>
+    <input type="text" id="paste-link" placeholder="https://…#/p/…" inputmode="url">
+    <div class="row-actions"><button class="btn sm primary" data-act="open-pasted">Åbn gildet</button>
+    ${navigator.clipboard?.readText ? '<button class="btn sm" data-act="paste-clip">📋 Indsæt link</button>' : ''}</div></div>` : ''}
   <p class="center small muted">Lavet til venner – ingen reklamer, ingen konto. <button class="linkbtn" data-act="help">Sådan virker det</button></p>
   </div>`;
 }
@@ -217,7 +229,7 @@ function identityBar() {
   const m = me();
   if (m) return `<div class="me" data-t="me">${avatar(m)}<div class="grow"><div class="small muted">Du er tilmeldt som</div><b>${esc(m.name)}</b>
     <div><button class="linkbtn small" data-act="not-me" data-t="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div></div>
-    <button class="btn sm ghost" data-act="edit-me" aria-label="Ret mine oplysninger">✏️ Ret</button></div>`;
+    ${m.ownerUid === store.uid ? '<button class="btn sm ghost" data-act="edit-me" aria-label="Ret mine oplysninger">✏️ Ret</button>' : ''}</div>`;
   const prof = LS.get('sg:profile', {});
   const mineHere = S.participants.filter(p => p.ownerUid === store.uid);
   return `<form class="card join" id="join-form" autocomplete="on">
@@ -394,6 +406,8 @@ function helpSheet() {
       <li>Alle med linket kan se navne og telefonnumre – del det kun med gæsterne.</li>
       <li>Tip: Tryk „Føj til hjemmeskærm“ i browseren for at få appen som et ikon.</li>
     </ul>
+    <h3>Notifikationer 🔔</h3>
+    ${notifGuideHtml()}
     <div class="actions"><button class="btn primary" data-act="close-sheet">Forstået</button></div></div>`);
 }
 
@@ -488,6 +502,175 @@ async function afterCreate() {
   });
 }
 
+// ───────────────────────────── Indstillinger & notifikationer ─────────────────────────────
+const appLink = () => partyUrl(S.pid).replace(/#\/p\/(\w+)$/, `#/p/$1${myId() ? '/mig/' + myId() : ''}`);
+
+function notifGuideHtml() {
+  return `<div class="guide">
+    <p><b>Slå til:</b> Åbn gildet, tryk ⚙️ <b>Indstillinger</b> → <b>Slå notifikationer til</b>, og tryk <b>Tillad</b>, når telefonen spørger.</p>
+    <p><b>🤖 Android:</b> Virker direkte i Chrome. Tryk Tillad, når du bliver spurgt.</p>
+    <p><b>🍎 iPhone:</b> Kræver iOS 16.4 eller nyere, og det virker kun fra hjemmeskærmen – ikke i en almindelig Safari-fane:</p>
+    <ol class="steps"><li>Åbn gildet i <b>Safari</b>.</li><li>Tryk <b>Del</b> <span class="ios-share">⬆︎</span> og vælg <b>Føj til hjemmeskærm</b>.</li>
+      <li>Åbn appen fra <b>ikonet på hjemmeskærmen</b>.</li><li>Tryk ⚙️ og slå notifikationer til dér.</li></ol>
+    <p><b>⏱️ Hvornår:</b> Beskederne kommer inden for ca. 15–30 minutter – ikke med det samme. Du får aldrig besked om det, du selv gør.</p>
+    <p><b>Slå fra:</b> ⚙️ → <b>Slå notifikationer fra</b>. Det gælder kun denne telefon og dette gilde.</p>
+    <p><b>Pr. telefon:</b> Indstillingerne gælder kun for den telefon, du slår dem til på – og for ét gilde ad gangen.</p>
+  </div>`;
+}
+function notifGuideSheet() { openSheet('Sådan får du notifikationer', notifGuideHtml() + '<div class="actions"><button class="btn primary" data-act="settings">Tilbage</button></div>'); }
+
+function iosHintHtml() {
+  return `<div class="warnbox" data-t="ios-hint"><b>📱 På iPhone skal appen på hjemmeskærmen først</b>
+    <ol class="steps"><li>Tryk på <b>Del</b>-knappen <span class="ios-share">⬆︎</span> nederst i Safari.</li>
+      <li>Vælg <b>Føj til hjemmeskærm</b> og tryk <b>Tilføj</b>.</li>
+      <li>Åbn <b>Sammenskud</b> fra ikonet på hjemmeskærmen.</li>
+      <li>Åbner appen ikke gildet af sig selv, så tryk <b>Indsæt link</b> på forsiden og indsæt app-linket herunder.</li>
+      <li>Tryk ⚙️ og slå notifikationer til dér.</li></ol>
+    <div class="row-actions" style="margin-top:6px"><button class="btn sm" data-act="copy-app-link">📋 Kopiér app-link</button>
+    <button class="btn sm ghost" data-act="notif-guide">Sådan virker det</button></div>
+    <p class="small muted" style="margin:8px 0 0">Kræver iOS 16.4 eller nyere. Hjemmeskærm-appen har sin egen hukommelse, så app-linket husker hvem du er. Dine egne ting retter du, hvor du oprettede dem.</p></div>`;
+}
+
+let settingsState = { sub: undefined, busy: false, msg: '' };
+async function settingsSheet() {
+  settingsState = { sub: undefined, busy: false, msg: '' };
+  openSheet('Indstillinger', '<div id="settings-body"></div>');
+  renderSettings();
+  if (S.view === 'party' && S.party && store.backend.kind !== 'mock') {
+    try { settingsState.sub = await store.getSub(S.pid); } catch (e) { console.warn(e); settingsState.sub = null; }
+    renderSettings();
+  } else settingsState.sub = null;
+}
+
+function renderSettings() {
+  const box = $('#settings-body'); if (!box) return;
+  const y = box.closest('.sheet')?.scrollTop || 0;
+  box.innerHTML = S.view === 'party' && S.party ? partySettingsHtml() : homeSettingsHtml();
+  const sh = box.closest('.sheet'); if (sh) sh.scrollTop = y;
+}
+
+function homeSettingsHtml() {
+  const prof = LS.get('sg:profile', {});
+  return `<section class="set"><h3>👤 Standard-oplysninger</h3>
+    <p class="small muted">Bruges til at udfylde tilmeldingen, næste gang du bliver inviteret.</p>
+    <form id="profile-form"><div class="two"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" value="${esc(prof.name || '')}"></label>
+    <label class="f"><span>Telefon</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(prof.phone || '')}"></label></div>
+    <div class="err"></div><div class="actions"><button class="btn sm primary">Gem</button></div></form></section>
+  <section class="set"><h3>🔗 Åbn et gilde fra et link</h3>
+    <p class="small muted">Fx i hjemmeskærm-appen på iPhone: indsæt linket, du har fået.</p>
+    <input type="text" id="paste-link" placeholder="https://…#/p/…" inputmode="url"><div class="actions"><button class="btn sm" data-act="open-pasted">Åbn gildet</button></div></section>
+  <section class="set"><h3>🔔 Notifikationer</h3><p class="small muted">Slås til inde i det enkelte gilde (⚙️ dér).</p>
+    <button class="btn sm ghost" data-act="notif-guide">Sådan får du notifikationer</button></section>
+  <section class="set"><h3>🧹 Andet</h3><div class="row-actions" style="margin-top:4px">
+    <button class="btn sm ghost" data-act="help">❓ Sådan virker det</button>
+    <button class="btn sm ghost" data-act="clear-parties">Ryd „Dine gilder“</button></div>
+    <p class="small muted">Version ${APP_VERSION} · ${esc(deviceLabel())}${isStandalone() ? ' · hjemmeskærm-app' : ''}</p></section>`;
+}
+
+function partySettingsHtml() {
+  const m = me(), token = S.admin && store.creatorToken(S.pid);
+  const you = m ? `<div class="me" style="margin:6px 0 0">${avatar(m)}<div class="grow"><b>${esc(m.name)}</b><div class="small muted">${esc(prettyPhone(m.phone))}</div></div></div>
+      <div class="row-actions">${m.ownerUid === store.uid ? '<button class="btn sm" data-act="edit-me">✏️ Ret navn og telefon</button>' : ''}
+      <button class="btn sm ghost" data-act="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div>`
+    : `<p class="small muted">Du er ikke tilmeldt dette gilde endnu.</p><button class="btn sm primary" data-act="close-sheet">Tilmeld mig</button>`;
+  return `<section class="set"><h3>👤 Dig i dette gilde</h3>${you}</section>
+    <section class="set" data-t="notif-section"><h3>🔔 Notifikationer</h3>${notifHtml()}</section>
+    <section class="set"><h3>🧹 Andet</h3><div class="row-actions" style="margin-top:4px">
+      ${token ? `<button class="btn sm" data-act="copy" data-text="${esc(adminUrl(S.pid, token))}" data-msg="Værts-linket er kopieret – gem det et sikkert sted">👑 Kopiér værts-link</button>` : ''}
+      <button class="btn sm ghost" data-act="copy-app-link">📋 Kopiér app-link</button>
+      <button class="btn sm ghost" data-act="help">❓ Sådan virker det</button>
+      <button class="btn sm ghost" data-act="forget-party">Glem gildet på denne telefon</button></div>
+      <p class="small muted">Version ${APP_VERSION} · ${esc(deviceLabel())}${isStandalone() ? ' · hjemmeskærm-app' : ''}</p></section>`;
+}
+
+function notifHtml() {
+  if (store.backend.kind === 'mock') return '<p class="small muted">Notifikationer kræver den rigtige server (ikke demotilstand).</p>';
+  const support = pushSupport();
+  const sub = settingsState.sub;
+  const guideBtn = '<button class="linkbtn small" data-act="notif-guide">Sådan virker det</button>';
+  if (support === 'ios-browser') return iosHintHtml();
+  if (support === 'insecure') return `<p class="small muted">Notifikationer kræver en sikker forbindelse (https).</p>`;
+  if (support === 'unsupported') return `<p class="small muted">Denne browser understøtter ikke notifikationer. Prøv Chrome på Android eller hjemmeskærm-appen på iPhone. ${guideBtn}</p>`;
+  if (sub === undefined) return '<p class="small muted">Henter …</p>';
+  const on = !!(sub?.enabled && sub.channels?.push);
+  const denied = support === 'denied';
+  if (!on) return `<p class="small">Få besked på denne telefon, når der sker noget i gildet. Beskederne kommer inden for ca. 15–30 minutter.</p>
+    ${denied ? '<div class="warnbox" style="margin:8px 0">Du har blokeret notifikationer for siden. Tillad dem igen i browserens/telefonens indstillinger for siden, og prøv så igen.</div>' : ''}
+    <button class="btn primary block" data-act="notif-toggle" data-t="notif-on" ${settingsState.busy || denied ? 'disabled' : ''}>🔔 Slå notifikationer til</button>
+    ${settingsState.msg ? `<div class="err">${esc(settingsState.msg)}</div>` : ''}<p style="margin:8px 0 0">${guideBtn}</p>`;
+  const t = { ...DEFAULT_TOPICS, ...(sub.topics || {}) };
+  const freq = sub.frequency || 'instant';
+  const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === (sub.digestHour ?? 18) ? 'selected' : ''}>kl. ${String(h).padStart(2, '0')}:00</option>`).join('');
+  return `<form id="notif-form" data-t="notif-form">
+    <div class="onrow"><span class="dot-on"></span><b>Slået til på denne telefon</b></div>
+    ${freq !== 'reminderOnly' ? `<label class="f"><span>Giv mig besked om</span></label>
+    <div class="checks" style="max-height:none">${TOPIC_LABELS.map(([k, l]) => `<label><input type="checkbox" name="topic" value="${k}" ${t[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div>` : ''}
+    <label class="f"><span>Hvor tit?</span></label>
+    <div class="seg seg3" data-seg="frequency"><button type="button" data-v="instant" class="${freq === 'instant' ? 'on' : ''}">Med det samme</button><button type="button" data-v="daily" class="${freq === 'daily' ? 'on' : ''}" data-t="freq-daily">Daglig opsamling</button><button type="button" data-v="reminderOnly" class="${freq === 'reminderOnly' ? 'on' : ''}">Kun påmindelse</button></div>
+    <input type="hidden" name="frequency" value="${freq}">
+    <p class="small muted" style="margin:6px 0 0">${freq === 'instant' ? 'Inden for ca. 15–30 minutter efter en ændring.' : freq === 'daily' ? 'Én besked om dagen med alt nyt – kun hvis der er nyt.' : 'Kun én påmindelse før festen.'}</p>
+    ${freq === 'daily' ? `<label class="f"><span>Tidspunkt for opsamling</span><select name="digestHour" data-t="digest-hour">${hours}</select></label>` : ''}
+    ${freq === 'reminderOnly' || t.reminder ? `<label class="f"><span>Påmindelse</span><select name="reminderBefore"><option value="1d" ${sub.reminderBefore !== '3h' ? 'selected' : ''}>1 dag før</option><option value="3h" ${sub.reminderBefore === '3h' ? 'selected' : ''}>3 timer før</option></select></label>
+      ${!S.party.date ? '<p class="small muted">Gildet har ingen dato endnu, så der kommer ingen påmindelse.</p>' : ''}` : ''}
+    <div class="row-actions">
+      <button type="button" class="btn sm" data-act="notif-test" data-t="notif-test">📨 Send testbesked</button>
+      <button type="button" class="btn sm danger" data-act="notif-toggle" data-t="notif-off">🔕 Slå notifikationer fra</button>
+    </div>
+    ${settingsState.msg ? `<p class="small" style="margin:8px 0 0">${esc(settingsState.msg)}</p>` : ''}
+    <p style="margin:8px 0 0">${guideBtn}</p></form>`;
+}
+
+function subPrefsFrom(sub) {
+  return { topics: { ...DEFAULT_TOPICS, ...(sub?.topics || {}) }, frequency: sub?.frequency || 'instant',
+    digestHour: Number.isInteger(sub?.digestHour) ? sub.digestHour : 18, reminderBefore: sub?.reminderBefore === '3h' ? '3h' : '1d' };
+}
+async function toggleNotifications() {
+  const sub = settingsState.sub;
+  const on = !!(sub?.enabled && sub.channels?.push);
+  settingsState.busy = true; settingsState.msg = ''; renderSettings();
+  try {
+    if (on) {
+      await store.saveSub(S.pid, { enabled: false });
+      settingsState.sub = { ...sub, enabled: false }; toast('Notifikationer er slået fra');
+    } else {
+      const push = await subscribePush();
+      const data = { enabled: true, participantId: myId() || '', tz: 'Europe/Copenhagen', channels: { push: { ...push, ua: deviceLabel() } },
+        ...subPrefsFrom(sub), baselineAt: store.ts() };
+      await store.saveSub(S.pid, data, !sub);
+      settingsState.sub = { ...(sub || {}), ...data }; toast('Notifikationer er slået til 🔔');
+    }
+  } catch (e) {
+    console.warn(e);
+    settingsState.msg = e.code === 'denied' ? 'Du sagde nej til notifikationer. Tillad dem i browserens indstillinger for siden.'
+      : e.code === 'dismissed' ? 'Tryk „Tillad“, når telefonen spørger.' : errMsg(e);
+  }
+  settingsState.busy = false; renderSettings();
+}
+async function saveNotifPrefs(form) {
+  const sub = settingsState.sub; if (!sub) return;
+  const topics = { ...subPrefsFrom(sub).topics };
+  const boxes = $$('input[name=topic]', form);
+  if (boxes.length) for (const k of Object.keys(DEFAULT_TOPICS)) topics[k] = boxes.some(b => b.value === k && b.checked);
+  const frequency = form.frequency.value;
+  const upd = { topics, frequency, digestHour: form.digestHour ? Number(form.digestHour.value) : subPrefsFrom(sub).digestHour,
+    reminderBefore: form.reminderBefore ? form.reminderBefore.value : subPrefsFrom(sub).reminderBefore };
+  if (frequency !== sub.frequency) upd.baselineAt = store.ts();   // ingen gammel ophobning ved skift
+  try { await store.saveSub(S.pid, upd); settingsState.sub = { ...sub, ...upd }; settingsState.msg = 'Gemt ✓'; renderSettings(); }
+  catch (e) { fail(e); }
+}
+async function testNotification() {
+  try {
+    await localNotification('Testbesked 🔔', `Notifikationer virker på denne telefon (${S.party.name}).`, partyUrl(S.pid));
+    await store.saveSub(S.pid, { testRequestedAt: store.ts() });
+    settingsState.msg = 'Du burde lige have fået en lokal testbesked. En test fra serveren kommer inden for ca. 15–30 minutter.';
+  } catch (e) { settingsState.msg = errMsg(e); }
+  renderSettings();
+}
+function syncSubParticipant() {
+  if (store.backend.kind === 'mock' || !S.pid) return;
+  store.getSub(S.pid).then(sub => { if (sub && sub.participantId !== (myId() || '')) return store.saveSub(S.pid, { participantId: myId() || '' }); }).catch(() => {});
+}
+
 // ───────────────────────────── Handlinger ─────────────────────────────
 function readPerson(form) {
   const name = form.name.value.trim(), phone = cleanPhone(form.phone.value);
@@ -503,6 +686,8 @@ async function register(form) {
   try {
     const id = await store.add(S.pid, 'participants', { name: p.name, phone: p.phone });
     LS.set(meKey(S.pid), id); LS.set('sg:profile', { name: p.name, phone: p.phone });
+    store.logActivity(S.pid, 'guest', `${p.name} er tilmeldt`, { participantId: id });
+    syncSubParticipant();
     closeSheet(); toast(`Velkommen, ${p.name}! 🎉`); render();
   } catch (e) { btn.disabled = false; fail(e); }
 }
@@ -510,7 +695,11 @@ async function register(form) {
 async function presetEvents(which) {
   const maxOrder = Math.max(0, ...S.events.map(e => e.order ?? 0));
   const titles = which === 'menu' ? ['Forret', 'Hovedret', 'Dessert'] : [which];
-  try { for (const [i, t] of titles.entries()) await store.add(S.pid, 'events', { title: t, kind: 'ret', time: '', order: maxOrder + i + 1 }); toast(titles.join(', ') + ' tilføjet'); }
+  try {
+    for (const [i, t] of titles.entries()) await store.add(S.pid, 'events', { title: t, kind: 'ret', time: '', order: maxOrder + i + 1 });
+    store.logActivity(S.pid, 'party', `Nyt i programmet: ${titles.join(', ')}`, { participantId: myId() || '' });
+    toast(titles.join(', ') + ' tilføjet');
+  }
   catch (e) { fail(e); }
 }
 
@@ -561,7 +750,7 @@ async function onClick(e) {
     case 'delete-event': {
       const ev = S.events.find(x => x.id === id); const n = S.items.filter(i => i.eventId === id).length;
       if (!confirm(`Slet "${ev.title}"?${n ? ` De ${n} bidrag flyttes til "Andet".` : ''}`)) return;
-      try { await store.remove(S.pid, 'events', id); closeSheet(); toast('Punktet er slettet'); } catch (err) { fail(err); }
+      try { await store.remove(S.pid, 'events', id); store.logActivity(S.pid, 'party', `Programpunkt aflyst: ${ev.title}`, { participantId: myId() || '' }); closeSheet(); toast('Punktet er slettet'); } catch (err) { fail(err); }
       return;
     }
     case 'new-item': return itemSheet(null, el.dataset.event || '', el.dataset.kind || 'ret');
@@ -572,7 +761,23 @@ async function onClick(e) {
       return;
     case 'edit-me': return meSheet(true);
     case 'not-me': return meSheet(false);
-    case 'be': if (id) LS.set(meKey(S.pid), id); else LS.del(meKey(S.pid)); closeSheet(); render(); if (id) toast(`Hej ${pName(id)}!`); return;
+    case 'be': if (id) LS.set(meKey(S.pid), id); else LS.del(meKey(S.pid)); syncSubParticipant(); closeSheet(); render(); if (id) toast(`Hej ${pName(id)}!`); return;
+    case 'settings': return settingsSheet();
+    case 'notif-toggle': return toggleNotifications();
+    case 'notif-test': return testNotification();
+    case 'notif-guide': return notifGuideSheet();
+    case 'copy-app-link': return copy(appLink(), 'App-linket er kopieret');
+    case 'forget-party':
+      if (!confirm('Glem gildet på denne telefon? (Det slettes ikke for de andre.)')) return;
+      LS.set('sg:parties', LS.get('sg:parties', []).filter(p => p.id !== S.pid)); LS.del(meKey(S.pid));
+      store.deleteSub(S.pid).catch(() => {}); location.hash = '#/'; toast('Gildet er glemt på denne telefon'); return;
+    case 'clear-parties': if (confirm('Ryd listen over dine gilder på denne telefon?')) { LS.set('sg:parties', []); closeSheet(); render(); } return;
+    case 'paste-clip': try { $('#paste-link').value = await navigator.clipboard.readText(); } catch { toast('Tryk i feltet og vælg Indsæt'); } return;
+    case 'open-pasted': {
+      const v = ($('#paste-link')?.value || '').trim(); const mm = v.match(/#\/p\/[A-Za-z0-9\/]+/);
+      if (!mm) { toast('Det ligner ikke et link til et gilde'); return; }
+      closeSheet(); location.hash = mm[0].slice(1); return;
+    }
     case 'remove-person': {
       const p = pById(id); if (!confirm(`Fjern ${p.name} fra gildet? Deres bidrag bliver stående.`)) return;
       try { await store.remove(S.pid, 'participants', id); toast(`${p.name} er fjernet`); } catch (err) { fail(err); }
@@ -587,6 +792,7 @@ function onSegClick(e) {
   $$('button', seg).forEach(x => x.classList.toggle('on', x === b));
   form[seg.dataset.seg].value = b.dataset.v;
   if (seg.dataset.seg === 'split') $('#among', form).style.display = b.dataset.v === 'selected' ? '' : 'none';
+  if (form.id === 'notif-form') { saveNotifPrefs(form); return true; }
   if (form.id === 'event-form' && seg.dataset.seg === 'kind') form.title.placeholder = b.dataset.v === 'program' ? 'F.eks. Kaffe og kage' : 'F.eks. Tapas';
   return true;
 }
@@ -604,13 +810,27 @@ async function onSubmit(e) {
     });
   }
   if (f.id === 'join-form' || f.id === 'switch-form') return register(f);
+  if (f.id === 'profile-form') {
+    const p = readPerson(f); if (p.err) return err(p.err);
+    LS.set('sg:profile', p); toast('Gemt'); closeSheet(); return;
+  }
   if (f.id === 'me-form') {
     const p = readPerson(f); if (p.err) return err(p.err);
     return busy(async () => { await store.update(S.pid, 'participants', myId(), p); LS.set('sg:profile', p); closeSheet(); toast('Gemt'); });
   }
   if (f.id === 'party-form') {
     const name = f.name.value.trim(); if (!name) return err('Giv gildet et navn.');
-    return busy(async () => { await store.updateParty(S.pid, { name, date: f.date.value, time: f.time.value, place: f.place.value.trim(), note: f.note.value.trim() }); closeSheet(); toast('Gildet er opdateret'); });
+    return busy(async () => {
+      const old = S.party, nu = { name, date: f.date.value, time: f.time.value, place: f.place.value.trim(), note: f.note.value.trim() };
+      await store.updateParty(S.pid, nu);
+      const what = [];
+      if (old.date !== nu.date || old.time !== nu.time) what.push(`nyt tidspunkt: ${prettyDate(nu.date, true)}${nu.time ? ' kl. ' + nu.time : ''}`);
+      if (old.place !== nu.place) what.push(`nyt sted: ${nu.place || '(intet)'}`);
+      if (old.name !== nu.name) what.push(`nyt navn: ${nu.name}`);
+      if (old.note !== nu.note) what.push('ny besked fra værten');
+      if (what.length) store.logActivity(S.pid, 'party', `Gildet er ændret – ${what.join(', ')}`, { participantId: myId() || '' });
+      closeSheet(); toast('Gildet er opdateret');
+    });
   }
   if (f.id === 'event-form') {
     const title = f.title.value.trim(); if (!title) return err('Skriv en titel.');
@@ -618,6 +838,7 @@ async function onSubmit(e) {
     return busy(async () => {
       if (f.dataset.id) await store.update(S.pid, 'events', f.dataset.id, data);
       else await store.add(S.pid, 'events', { ...data, order: Math.max(0, ...S.events.map(x => x.order ?? 0)) + 1 });
+      store.logActivity(S.pid, 'party', `${f.dataset.id ? 'Programpunkt ændret' : 'Nyt programpunkt'}: ${data.time ? data.time + ' ' : ''}${title}`, { participantId: myId() || '' });
       closeSheet(); toast(f.dataset.id ? 'Gemt' : `${title} er tilføjet`);
     });
   }
@@ -634,8 +855,19 @@ async function onSubmit(e) {
     if (cost && split === 'selected' && !among.length) return err('Vælg mindst én person.');
     const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost ? among : [] };
     return busy(async () => {
-      if (f.dataset.id) await store.update(S.pid, 'items', f.dataset.id, data);
-      else await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: myId() });
+      const who = me()?.name || 'Nogen';
+      if (f.dataset.id) {
+        const old = S.items.find(x => x.id === f.dataset.id);
+        await store.update(S.pid, 'items', f.dataset.id, data);
+        if (old && (old.cost || 0) !== cost) store.logActivity(S.pid, 'cost', `${pName(old.participantId)}: udgiften for ${title} er nu ${formatKr(cost)}`, { participantId: myId() || '' });
+      } else {
+        await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: myId() });
+        const ev = S.events.find(x => x.id === f.dataset.event);
+        const text = kind === 'udgift' ? `${who} har lagt ud for ${title} (${formatKr(cost)})`
+          : kind === 'aktivitet' ? `${who} står for ${title}${ev ? ' (' + ev.title + ')' : ''}`
+          : `${who} tager ${title} med${ev ? ' til ' + ev.title.toLowerCase() : ''}${cost ? ' (' + formatKr(cost) + ')' : ''}`;
+        store.logActivity(S.pid, kind === 'udgift' ? 'cost' : 'item', text, { participantId: myId() || '', hasCost: kind !== 'udgift' && cost > 0 });
+      }
       closeSheet(); toast(f.dataset.id ? 'Gemt' : 'Tilføjet – tak! 🙌');
     });
   }
@@ -644,6 +876,7 @@ async function onSubmit(e) {
 // ───────────────────────────── Start ─────────────────────────────
 document.addEventListener('click', e => { if (onSegClick(e)) return; onClick(e); });
 document.addEventListener('submit', onSubmit);
+document.addEventListener('change', e => { const f = e.target.closest('#notif-form'); if (f) saveNotifPrefs(f); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
 (async () => {
@@ -655,4 +888,6 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
   }
   addEventListener('hashchange', route);
   route();
+  if (store.backend.kind !== 'mock') registerServiceWorker();
+  navigator.serviceWorker?.addEventListener('message', e => { if (e.data?.type === 'open' && e.data.url) location.href = e.data.url; });
 })();

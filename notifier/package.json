@@ -1,0 +1,17 @@
+{
+  "name": "sammenskudsgilde-notifier",
+  "private": true,
+  "type": "module",
+  "description": "Sender web push-notifikationer for Sammenskudsgilde (kører i GitHub Actions)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "send": "node send.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.10.0",
+    "web-push": "^3.6.7"
+  }
+}

@@ -31,7 +31,17 @@ rules_version = '2';
 //  • Reglerne kan ikke garantere, at beløb er "rigtige" – kun at de er heltal i øre
 //    inden for et fornuftigt interval.
 //  • Når et gilde slettes, sletter appen først under-dokumenterne. Efterladte
-//    claims-dokumenter (fra andre enheder) er ulæselige og harmløse.
+//    claims-dokumenter (fra andre enheder) er ulæselige og harmløse; andres
+//    notifikations-abonnementer ryddes op af senderen (GitHub Actions).
+//
+//  NOTIFIKATIONER
+//  • activity/{id}: en kort log ("Bo tager lasagne med"), som appen skriver ved hver
+//    handling. Senderen (Admin SDK i GitHub Actions, som ikke er underlagt reglerne)
+//    læser den og sender web push. Loggen kan ikke rettes; kun værten kan slette.
+//  • subs/{uid}: notifikations-indstillinger + push-abonnement for ÉN enhed. Kun
+//    ejeren (samme uid) kan læse/skrive sit eget dokument; ingen kan liste dem.
+//    Felterne lastNotifiedAt, lastDigestAt, reminderSentFor og testSentAt skrives kun
+//    af senderen. En e-mail-kanal kan senere tilføjes som channels.email.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 service cloud.firestore {
@@ -107,6 +117,58 @@ service cloud.firestore {
         allow update: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid))
           && validParticipant(request.resource.data) && unchanged(['ownerUid', 'createdAt']);
         allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+      }
+
+      // ── Aktivitetslog (til notifikationer) ─────────────────────────────────
+      match /activity/{aid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid)
+          && request.resource.data.keys().hasOnly(['type', 'text', 'actorUid', 'participantId', 'hasCost', 'createdAt'])
+          && request.resource.data.type in ['guest', 'item', 'cost', 'party']
+          && (request.resource.data.type != 'party' || isAdmin(pid))
+          && isStr(request.resource.data.text, 1, 200)
+          && request.resource.data.actorUid == request.auth.uid
+          && isStr(request.resource.data.participantId, 0, 40)
+          && (!('hasCost' in request.resource.data) || request.resource.data.hasCost is bool)
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if isAdmin(pid);
+      }
+
+      // ── Notifikations-abonnementer (ét pr. enhed/uid) ────────────────────────
+      function senderFields() { return ['lastNotifiedAt', 'lastDigestAt', 'reminderSentFor', 'testSentAt']; }
+      function validSub(d) {
+        return d.keys().hasOnly(['enabled', 'participantId', 'channels', 'topics', 'frequency', 'digestHour',
+                                 'reminderBefore', 'tz', 'baselineAt', 'testRequestedAt', 'createdAt', 'updatedAt',
+                                 'lastNotifiedAt', 'lastDigestAt', 'reminderSentFor', 'testSentAt'])
+          && d.enabled is bool
+          && isStr(d.participantId, 0, 40)
+          && d.channels is map && d.channels.keys().hasOnly(['push'])            // senere: 'email'
+          && (!('push' in d.channels) || (
+                d.channels.push is map && d.channels.push.keys().hasOnly(['endpoint', 'keys', 'ua'])
+                && isStr(d.channels.push.endpoint, 10, 1000) && d.channels.push.endpoint.matches('https://.*')
+                && d.channels.push.keys is map && d.channels.push.keys.keys().hasOnly(['p256dh', 'auth'])
+                && isStr(d.channels.push.keys.p256dh, 1, 200) && isStr(d.channels.push.keys.auth, 1, 100)
+                && (!('ua' in d.channels.push) || isStr(d.channels.push.ua, 0, 40))))
+          && d.topics is map && d.topics.keys().hasOnly(['guests', 'items', 'party', 'costs', 'reminder'])
+          && d.frequency in ['instant', 'daily', 'reminderOnly']
+          && d.digestHour is int && d.digestHour >= 0 && d.digestHour <= 23
+          && d.reminderBefore in ['1d', '3h']
+          && isStr(d.tz, 1, 50);
+      }
+      match /subs/{uid} {
+        allow get: if signedIn() && uid == request.auth.uid;
+        allow list: if false;
+        allow create: if signedIn() && uid == request.auth.uid && partyExists(pid)
+          && validSub(request.resource.data)
+          && !request.resource.data.keys().hasAny(senderFields());
+        allow update: if signedIn() && uid == request.auth.uid
+          && validSub(request.resource.data)
+          && unchanged(senderFields().concat(['createdAt']))
+          && (!('testRequestedAt' in request.resource.data)
+              || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['testRequestedAt'])
+              || request.resource.data.testRequestedAt == request.time);
+        allow delete: if signedIn() && uid == request.auth.uid;
       }
 
       // ── Retter, aktiviteter og udgifter ──────────────────────────────────────

@@ -35,6 +35,32 @@ Beløb regnes præcist til øren. Går et beløb ikke lige op, får de første t
 
 Ved hver gæld står modtagerens **telefonnummer** og **beløbet** med knapperne **Kopiér nr.** og **Kopiér beløb**. Knappen **Åbn MobilePay** forsøger at åbne MobilePay med nummer og beløb udfyldt. MobilePay tilbyder ikke dette officielt, så sker der ikke noget, kopierer du bare nummer og beløb ind i MobilePay selv. Du kan også sende en SMS til modtageren.
 
+## Notifikationer 🔔
+Du kan få besked på telefonen, når der sker noget i et gilde: nye gæster, nye retter og aktiviteter, ændringer i gildet eller programmet, nye udgifter og en påmindelse før festen.
+
+**Sådan slår du det til:** Åbn gildet, tryk på tandhjulet **⚙️ Indstillinger** → **Slå notifikationer til**, og tryk **Tillad**, når telefonen spørger. Vælg derefter, hvad du vil have besked om, og hvor tit:
+- **Med det samme** – inden for ca. 15–30 minutter efter en ændring,
+- **Daglig opsamling** – én besked om dagen på det tidspunkt, du vælger (kun hvis der er nyt),
+- **Kun påmindelse før festen** – 1 dag eller 3 timer før.
+
+Med **Send testbesked** kan du se, at det virker.
+
+- **🤖 Android:** Virker direkte i Chrome. Tryk Tillad, når du bliver spurgt.
+- **🍎 iPhone:** Kræver iOS 16.4 eller nyere, og det virker kun fra hjemmeskærmen – ikke i en almindelig Safari-fane:
+  1. Åbn gildet i **Safari**.
+  2. Tryk **Del** og vælg **Føj til hjemmeskærm**.
+  3. Åbn appen fra **ikonet på hjemmeskærmen**. Åbner den ikke gildet af sig selv, så kopiér **app-linket** under ⚙️ i Safari først, og tryk **Indsæt link** på appens forside.
+  4. Tryk ⚙️ og slå notifikationer til dér.
+
+  Hjemmeskærm-appen har sin egen hukommelse. App-linket husker, hvem du er, men dine egne ting retter du, hvor du oprettede dem. Tip: læg appen på hjemmeskærmen, før du tilmelder dig.
+- **Ikke med det samme:** Beskederne sendes ca. hvert kvarter, så der kan gå 15–30 minutter (nogle gange lidt mere).
+- **Du får aldrig besked om det, du selv gør.**
+- **Pr. telefon og pr. gilde:** Indstillingerne gælder kun den telefon og det gilde, du slår dem til i.
+- **Slå fra:** ⚙️ → **Slå notifikationer fra**.
+
+## Indstillinger ⚙️
+Under tandhjulet kan du også rette dit navn og telefonnummer, skifte person (**Jeg er ikke …**), kopiere værts-linket (vært) og app-linket, og glemme et gilde på telefonen. På forsiden kan du gemme dine standard-oplysninger og åbne et gilde ud fra et link.
+
 ## Det skal I være opmærksomme på
 - **Linket er nøglen.** Alle, der har linket, kan se gæsternes navne og telefonnumre og skrive sig på. Del det kun med gæsterne. Gildet kan ikke findes på anden måde; linket er langt og tilfældigt.
 - **Rettigheder hører til telefonen/browseren.** Rydder du browserdata, bruger privat vindue eller skifter telefon, kan du ikke længere rette dine gamle ting (de bliver stående).
@@ -44,3 +70,4 @@ Ved hver gæld står modtagerens **telefonnummer** og **beløbet** med knapperne
 
 ## Teknik (kort)
 Statisk side på GitHub Pages med data i Google Firebase Firestore (EU, eur3) og anonymt Firebase-login. Konfigurationen står i `firebase-config.js`, og sikkerhedsreglerne i `firestore.rules` (skal indsættes i Firebase-konsollen under Firestore → Regler).
+Notifikationer: `sw.js` (service worker) modtager web push. Beskederne sendes af `notifier/send.js`, som GitHub Actions kører ca. hvert 15. minut (`.github/workflows/notify.yml`) med hemmelighederne `FIREBASE_SERVICE_ACCOUNT`, `VAPID_PUBLIC_KEY` og `VAPID_PRIVATE_KEY`. GitHub slår planlagte workflows fra efter 60 dage uden aktivitet i repoet; så skal workflowet slås til igen under Actions.

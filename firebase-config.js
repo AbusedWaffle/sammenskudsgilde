@@ -23,4 +23,7 @@ export const firebaseConfig = {
 // Firebase JS SDK-version der hentes fra gstatic (ES-moduler, intet build-trin).
 export const FIREBASE_SDK_VERSION = "12.19.0";
 
+// Offentlig VAPID-nøgle til web push (den private nøgle ligger KUN som GitHub-secret).
+export const VAPID_PUBLIC_KEY = "BAGS-JPk0T7Asyh26y36Avv26TWQaP4kGqxLFwHWJDhrJjd5IC6FGuRr6AJ25mAlaSbORlUEI4YtE7H9HIqpnkA";
+
 export const isConfigured = () => !String(firebaseConfig.projectId || "").startsWith("INDSÆT");

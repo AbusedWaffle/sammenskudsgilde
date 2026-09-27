@@ -11,6 +11,12 @@
 //   parties/{partyId}/items/{id}          eventId, participantId, ownerUid, title, kind, servings, note,
 //                                         cost (øre), split ('all'|'selected'), among [participantIds]
 //   parties/{partyId}/claims/{uid}        { key } – bevis for opretter-nøgle (kan ikke læses af nogen)
+//   parties/{partyId}/activity/{id}       type, text, actorUid, participantId, hasCost, createdAt – til notifikationer
+//   parties/{partyId}/subs/{uid}          notifikations-indstillinger pr. enhed (kun ejeren kan læse/skrive):
+//                                         enabled, participantId, channels.push{endpoint,keys}, topics{…},
+//                                         frequency, digestHour, reminderBefore, tz, baselineAt, testRequestedAt,
+//                                         + felter som kun senderen skriver: lastNotifiedAt, lastDigestAt,
+//                                         reminderSentFor, testSentAt. (Senere: channels.email)
 
 import { firebaseConfig, FIREBASE_SDK_VERSION, isConfigured } from './firebase-config.js';
 import { randomId, randomToken, sha256Hex } from './util.js';
@@ -61,7 +67,9 @@ async function firebaseBackend(kind) {
   return {
     uid: user.uid,
     ts: () => fs.serverTimestamp(),
-    set: (path, data) => fs.setDoc(ref(path), data),
+    set: (path, data, merge) => fs.setDoc(ref(path), data, merge ? { merge: true } : {}),
+    get: async path => { const d = await fs.getDoc(ref(path)); return d.exists() ? norm(d) : null; },
+    list: async path => (await fs.getDocs(fs.collection(db, ...path))).docs.map(norm),
     update: (path, data) => fs.updateDoc(ref(path), data),
     remove: path => fs.deleteDoc(ref(path)),
     watchDoc: (path, cb, err) => fs.onSnapshot(ref(path), s => cb(s.exists() ? norm(s) : null), err),
@@ -87,7 +95,9 @@ function mockBackend() {
   return {
     uid,
     ts: () => Date.now(),
-    async set(path, data) { const db = load(); db[key(path)] = structuredClone(data); save(db); },
+    async set(path, data, merge) { const db = load(); db[key(path)] = { ...(merge ? db[key(path)] : {}), ...structuredClone(data) }; save(db); },
+    async get(path) { const v = load()[key(path)]; return v ? { id: path.at(-1), ...v } : null; },
+    async list(path) { const pre = key(path) + '/'; return Object.entries(load()).filter(([k]) => k.startsWith(pre) && !k.slice(pre.length).includes('/')).map(([k, v]) => ({ id: k.slice(pre.length), ...v })); },
     async update(path, data) {
       const db = load(); const k = key(path);
       if (!db[k]) throw Object.assign(new Error('No document to update'), { code: 'not-found' });
@@ -152,6 +162,8 @@ export async function createStore() {
     updateParty: (pid, fields) => b.update(['parties', pid], { ...fields, updatedAt: b.ts() }),
     async deleteParty(pid, lists) {
       for (const sub of SUBS) for (const d of lists[sub] || []) await b.remove(['parties', pid, sub, d.id]);
+      for (const d of await b.list(['parties', pid, 'activity']).catch(() => [])) await b.remove(['parties', pid, 'activity', d.id]);
+      await b.remove(['parties', pid, 'subs', b.uid]).catch(() => {});
       await b.remove(['parties', pid]);
       await b.remove(['parties', pid, 'claims', b.uid]).catch(() => {});
       localStorage.removeItem(tokenKey(pid));
@@ -166,6 +178,19 @@ export async function createStore() {
       return id;
     },
     update: (pid, sub, id, data) => b.update(['parties', pid, sub, id], data),
+
+    /** Aktivitetslog til notifikationer. Fejl her må aldrig stoppe selve handlingen. */
+    logActivity(pid, type, text, extra = {}) {
+      return b.set(['parties', pid, 'activity', randomId(20)], { type, text: String(text).slice(0, 200), actorUid: b.uid,
+        participantId: extra.participantId || '', ...(extra.hasCost ? { hasCost: true } : {}), createdAt: b.ts() })
+        .catch(e => console.warn('aktivitet ikke logget', e));
+    },
+    // Notifikations-abonnement for denne enhed i dette gilde
+    getSub: pid => b.get(['parties', pid, 'subs', b.uid]),
+    saveSub: (pid, data, isNew) => b.set(['parties', pid, 'subs', b.uid],
+      { ...data, updatedAt: b.ts(), ...(isNew ? { createdAt: b.ts() } : {}) }, true),
+    deleteSub: pid => b.remove(['parties', pid, 'subs', b.uid]),
+    ts: () => b.ts(),
     remove: (pid, sub, id) => b.remove(['parties', pid, sub, id]),
   };
   return store;
