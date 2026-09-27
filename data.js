@@ -7,9 +7,12 @@
 // Datamodel (Firestore):
 //   parties/{partyId}                     navn, dato, tid, sted, note, creatorUid, creatorHash
 //   parties/{partyId}/events/{id}         programpunkt/ret: title, time, kind, order
-//   parties/{partyId}/participants/{id}   name, phone, ownerUid
+//   parties/{partyId}/participants/{id}   name, phone, ownerUid ('' = uden egen bruger), householdId, isChild,
+//                                         status ('yes'|'maybe'|'no', mangler = 'yes'), addedByUid
+//   parties/{partyId}/households/{id}     name, memberUids [uid'er med bruger i husstanden], createdByUid
 //   parties/{partyId}/items/{id}          eventId, participantId, ownerUid, title, kind, servings, note,
-//                                         cost (øre), split ('all'|'selected'), among [participantIds]
+//                                         cost (øre), split ('all'|'selected'|'households'),
+//                                         among [participantIds] eller [husstands-/enheds-id'er] ved 'households'
 //   parties/{partyId}/claims/{uid}        { key } – bevis for opretter-nøgle (kan ikke læses af nogen)
 //   parties/{partyId}/activity/{id}       type, text, actorUid, participantId, hasCost, createdAt – til notifikationer
 //   parties/{partyId}/subs/{uid}          notifikations-indstillinger pr. enhed (kun ejeren kan læse/skrive):
@@ -30,7 +33,7 @@ export function chooseBackend() {
   return { kind: 'mock', reason: 'unconfigured' };
 }
 
-const SUBS = ['events', 'participants', 'items'];
+const SUBS = ['events', 'participants', 'items', 'households'];
 
 // ───────────────────────────── Firebase / emulator ─────────────────────────────
 async function firebaseBackend(kind) {
@@ -74,6 +77,14 @@ async function firebaseBackend(kind) {
     remove: path => fs.deleteDoc(ref(path)),
     watchDoc: (path, cb, err) => fs.onSnapshot(ref(path), s => cb(s.exists() ? norm(s) : null), err),
     watchColl: (path, cb, err) => fs.onSnapshot(fs.collection(db, ...path), s => cb(s.docs.map(norm)), err),
+    union: v => fs.arrayUnion(v),
+    unionRemove: v => fs.arrayRemove(v),
+    /** Atomisk skrivning af flere dokumenter: [{op:'set'|'update'|'remove', path, data}] */
+    batch: ops => {
+      const w = fs.writeBatch(db);
+      for (const o of ops) o.op === 'set' ? w.set(ref(o.path), o.data) : o.op === 'update' ? w.update(ref(o.path), o.data) : w.delete(ref(o.path));
+      return w.commit();
+    },
   };
 }
 
@@ -92,16 +103,37 @@ function mockBackend() {
   const key = path => path.join('/');
   const denied = () => Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
   const watch = fn => { listeners.add(fn); setTimeout(() => fn(load()), 0); return () => listeners.delete(fn); };
+  // arrayUnion/arrayRemove-markører
+  const apply = (old = {}, data) => {
+    const out = { ...old };
+    for (const [k, v] of Object.entries(structuredClone(data))) {
+      if (v && v.__union !== undefined) out[k] = [...new Set([...(out[k] || []), v.__union])];
+      else if (v && v.__remove !== undefined) out[k] = (out[k] || []).filter(x => x !== v.__remove);
+      else out[k] = v;
+    }
+    return out;
+  };
   return {
     uid,
     ts: () => Date.now(),
-    async set(path, data, merge) { const db = load(); db[key(path)] = { ...(merge ? db[key(path)] : {}), ...structuredClone(data) }; save(db); },
+    union: v => ({ __union: v }),
+    unionRemove: v => ({ __remove: v }),
+    async batch(ops) {
+      const db = load();
+      for (const o of ops) {
+        const k = key(o.path);
+        if (o.op === 'update' && !db[k]) throw Object.assign(new Error('No document to update'), { code: 'not-found' });
+        if (o.op === 'remove') delete db[k]; else db[k] = apply(o.op === 'update' ? db[k] : {}, o.data);
+      }
+      save(db);
+    },
+    async set(path, data, merge) { const db = load(); db[key(path)] = apply(merge ? db[key(path)] : {}, data); save(db); },
     async get(path) { const v = load()[key(path)]; return v ? { id: path.at(-1), ...v } : null; },
     async list(path) { const pre = key(path) + '/'; return Object.entries(load()).filter(([k]) => k.startsWith(pre) && !k.slice(pre.length).includes('/')).map(([k, v]) => ({ id: k.slice(pre.length), ...v })); },
     async update(path, data) {
       const db = load(); const k = key(path);
       if (!db[k]) throw Object.assign(new Error('No document to update'), { code: 'not-found' });
-      db[k] = { ...db[k], ...structuredClone(data) }; save(db);
+      db[k] = apply(db[k], data); save(db);
     },
     async remove(path) { const db = load(); delete db[key(path)]; save(db); },
     watchDoc(path, cb) {
@@ -129,6 +161,11 @@ export async function createStore() {
   const b = choice.kind === 'mock' ? mockBackend() : await firebaseBackend(choice.kind);
 
   const tokenKey = pid => 'sg:creator:' + pid;
+  // Forlad gammel husstand: fjern mig fra memberUids (medmindre en anden af mine deltagere stadig er der),
+  // eller slet husstanden, hvis den bliver helt tom.
+  const leaveOps = (pid, leave) => !leave?.hid ? [] : leave.remove
+    ? [{ op: 'remove', path: ['parties', pid, 'households', leave.hid] }]
+    : leave.keepMember ? [] : [{ op: 'update', path: ['parties', pid, 'households', leave.hid], data: { memberUids: b.unionRemove(b.uid) } }];
   const store = {
     backend: choice,
     uid: b.uid,
@@ -178,6 +215,43 @@ export async function createStore() {
       return id;
     },
     update: (pid, sub, id, data) => b.update(['parties', pid, sub, id], data),
+
+    // ── Husstande ──────────────────────────────────────────────────────────
+    // Alle husstands-ændringer der rører både husstanden og en deltager sker i én batch, så reglerne
+    // kan tjekke medlemskab "efter" skrivningen (getAfter).
+    /** Opret husstand med mig som medlem, og flyt min deltager ind. leave = {hid, keepMember} for gammel husstand. */
+    async createHousehold(pid, name, myPid, leave) {
+      const hid = randomId(20);
+      await b.batch([
+        { op: 'set', path: ['parties', pid, 'households', hid], data: { name, memberUids: [b.uid], createdByUid: b.uid, createdAt: b.ts() } },
+        { op: 'update', path: ['parties', pid, 'participants', myPid], data: { householdId: hid } },
+        ...leaveOps(pid, leave),
+      ]);
+      return hid;
+    },
+    /** Meld min deltager ind i en eksisterende husstand (ingen godkendelse). */
+    joinHousehold: (pid, hid, myPid, leave) => b.batch([
+      { op: 'update', path: ['parties', pid, 'households', hid], data: { memberUids: b.union(b.uid) } },
+      { op: 'update', path: ['parties', pid, 'participants', myPid], data: { householdId: hid } },
+      ...leaveOps(pid, leave),
+    ]),
+    /** Meld min deltager ud af husstanden. */
+    leaveHousehold: (pid, myPid, leave) => b.batch([
+      { op: 'update', path: ['parties', pid, 'participants', myPid], data: { householdId: '' } },
+      ...leaveOps(pid, leave),
+    ]),
+    renameHousehold: (pid, hid, name) => b.update(['parties', pid, 'households', hid], { name }),
+    /** Tilføj en person uden egen bruger (barn, partner …) til husstanden. */
+    async addMember(pid, hid, { name, phone = '', isChild = false, status = 'yes' }) {
+      const id = randomId(20);
+      await b.set(['parties', pid, 'participants', id], { name, phone, isChild, status, householdId: hid, ownerUid: '', addedByUid: b.uid, createdAt: b.ts() });
+      return id;
+    },
+    /** "Det er mig": overtag en person uden bruger. Samme ID, så retter og udgifter følger med. */
+    claim: (pid, person, { name, phone, status }) => b.batch([
+      ...(person.householdId ? [{ op: 'update', path: ['parties', pid, 'households', person.householdId], data: { memberUids: b.union(b.uid) } }] : []),
+      { op: 'update', path: ['parties', pid, 'participants', person.id], data: { ownerUid: b.uid, name, phone, status } },
+    ]),
 
     /** Aktivitetslog til notifikationer. Fejl her må aldrig stoppe selve handlingen. */
     logActivity(pid, type, text, extra = {}) {

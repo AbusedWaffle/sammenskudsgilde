@@ -18,25 +18,43 @@ Tip: Tryk på del-knappen i browseren og vælg **Føj til hjemmeskærm**, så li
 1. Gæsten åbner linket (eller scanner QR-koden).
 2. Skriver sit **navn** og **telefonnummer** og trykker **Tilmeld mig**. Så kan de andre se, hvem man er, og betale en tilbage via MobilePay.
 3. Telefonen husker, hvem man er, næste gang linket åbnes. Låner man en andens telefon, trykker man **Jeg er ikke …** og tilmelder sig som ny person.
+4. Har en anden allerede skrevet dig på (fx din partner), spørger appen **Er du en af disse?**. Tryk **Det er mig** ved dit navn og skriv dit nummer. Så overtager du pladsen, og det, der allerede står på dig, følger med. Er du ikke på listen, så tryk **Nej, jeg er ny**.
+
+## Kommer du? ✅ 🤔 ❌
+Øverst i gildet vælger du **Kommer**, **Måske** eller **Kommer ikke** (standard er Kommer). Du kan ændre det når som helst.
+
+Fanen **👥 Gæster** er gæstelisten: øverst står, hvor mange **voksne og børn** der kommer, måske kommer og ikke kommer, og nedenunder er alle gæster samlet i husstande.
+
+## Husstande 🏠 (partner, børn, søskende …)
+- Tryk **🏠 Kommer du med nogen? Opret husstand**, giv husstanden et navn (fx "Familien Hansen"), og tryk **Opret husstand**.
+- Tryk **+ Tilføj person** og skriv dem på, du kommer med, også selvom de ikke selv har appen: navn, evt. telefonnummer, og om det er et **barn**.
+- Er din familie allerede skrevet på, så tryk **Tilføj mig** ved deres husstand. Det kræver ingen godkendelse. Man kan kun være med i én husstand pr. gilde.
+- Alle i husstanden, der har tilmeldt sig selv, kan rette og fjerne husstandens personer uden egen bruger og melde dem til og fra (fx "Sofie kommer måske"). Man kan ikke rette en anden, der selv har tilmeldt sig (det kan kun værten).
+- Fjerner du en person, der har skrevet noget på, flyttes det over til dig, så regnskabet stadig passer.
+- Når du skriver noget på, kan du vælge, om det er dig eller en i din husstand, der tager det med.
+- Kommer du alene, behøver du ingen husstand; så tæller du som en husstand for dig selv.
 
 ## Retter, aktiviteter og udgifter
 - Under hvert punkt trykker man **+ Jeg tager noget med** og skriver, **hvad** man tager med (en ret, en aktivitet eller andet), **til hvor mange personer**, en evt. **note** (fx "vegetarisk") og evt. **hvad det kostede** i kr.
-- En udgift kan deles mellem **alle deltagere** eller kun **udvalgte** (fx vin kun til dem, der drikker).
+- En udgift kan deles på tre måder:
+  - **Alle (pr. person):** lige meget pr. person blandt dem, der kommer. Børn tæller som en person. Dem, der har meldt **Kommer ikke**, er ikke med.
+  - **Pr. husstand:** hver husstand betaler lige meget, uanset hvor mange de er. Du kan vælge alle husstande eller kun nogle.
+  - **Udvalgte:** kun de personer, du vælger (fx vin kun til dem, der drikker).
 - Udgifter, der ikke hører til en ret (leje af lokale, vin, indkøb), tilføjes under fanen **💰 Regnskab** med **Tilføj en udgift**.
 - Alle kan se, hvad de andre tager med. Man kan rette og slette sine egne ting med ✏️.
 
 ## Regnskab og MobilePay
 Fanen **💰 Regnskab** viser:
 - hvad der er brugt i alt,
-- for hver person: hvad de har **betalt**, deres **andel** og deres **saldo** (plus = skal have penge, minus = skylder),
-- **Hvem skylder hvem** med så få overførsler som muligt.
+- for hver **husstand**: hvad de har **betalt**, deres **andel** og deres **saldo** (plus = skal have penge, minus = skylder). Kommer man alene, er man sin egen husstand,
+- **Hvem skylder hvem** med så få overførsler som muligt, samlet pr. husstand. Penge inden for samme husstand regnes ikke med.
 
 Beløb regnes præcist til øren. Går et beløb ikke lige op, får de første tilmeldte den ekstra øre.
 
-Ved hver gæld står modtagerens **telefonnummer** og **beløbet** med knapperne **Kopiér nr.** og **Kopiér beløb**. Knappen **Åbn MobilePay** forsøger at åbne MobilePay med nummer og beløb udfyldt. MobilePay tilbyder ikke dette officielt, så sker der ikke noget, kopierer du bare nummer og beløb ind i MobilePay selv. Du kan også sende en SMS til modtageren.
+Ved hver gæld står, hvem i den modtagende husstand pengene skal til (den, der har lagt ud, eller en med telefonnummer), med **telefonnummer** og **beløbet** med knapperne **Kopiér nr.** og **Kopiér beløb**. Knappen **Åbn MobilePay** forsøger at åbne MobilePay med nummer og beløb udfyldt. MobilePay tilbyder ikke dette officielt, så sker der ikke noget, kopierer du bare nummer og beløb ind i MobilePay selv. Du kan også sende en SMS til modtageren.
 
 ## Notifikationer 🔔
-Du kan få besked på telefonen, når der sker noget i et gilde: nye gæster, nye retter og aktiviteter, ændringer i gildet eller programmet, nye udgifter og en påmindelse før festen.
+Du kan få besked på telefonen, når der sker noget i et gilde: nye gæster (også nye i en husstand, og når nogen melder til eller fra), nye retter og aktiviteter, ændringer i gildet eller programmet, nye udgifter og en påmindelse før festen.
 
 **Sådan slår du det til:** Åbn gildet, tryk på tandhjulet **⚙️ Indstillinger** → **Slå notifikationer til**, og tryk **Tillad**, når telefonen spørger. Vælg derefter, hvad du vil have besked om, og hvor tit:
 - **Med det samme** – inden for ca. 15–30 minutter efter en ændring,
@@ -65,6 +83,7 @@ Under tandhjulet kan du også rette dit navn og telefonnummer, skifte person (**
 - **Linket er nøglen.** Alle, der har linket, kan se gæsternes navne og telefonnumre og skrive sig på. Del det kun med gæsterne. Gildet kan ikke findes på anden måde; linket er langt og tilfældigt.
 - **Rettigheder hører til telefonen/browseren.** Rydder du browserdata, bruger privat vindue eller skifter telefon, kan du ikke længere rette dine gamle ting (de bliver stående).
 - **Værts-linket:** Som vært finder du under **🔗 Del** et hemmeligt **værts-link**. Gem det (fx i en note til dig selv). Med det kan du rette og slette gildet fra en anden telefon eller efter at have ryddet browseren. Send det ikke til gæsterne.
+- **Husstande er uden godkendelse.** Alle med linket kan melde sig ind i en husstand og så rette dens personer uden egen bruger, og kan trykke "Det er mig" ved en voksen uden bruger. Det er et bevidst valg til en venne-app; værten kan rette det tilbage.
 - **Værten kan rette og slette alt** i gildet, også andres ting, og kan slette hele gildet under **✏️ Ret gildet**. Det kan ikke fortrydes.
 - Alt gemmes online og opdateres live for alle, også når appen er lukket. Det kræver internet.
 

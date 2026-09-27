@@ -1,9 +1,9 @@
 import { createStore } from './data.js';
-import { settle, parseKr, formatKr } from './settle.js';
+import { settle, parseKr, formatKr, headcount, statusOf, unitsOf } from './settle.js';
 import { cleanPhone, prettyPhone, mobilepayPhone, isValidPhone } from './util.js';
 import { pushSupport, subscribePush, localNotification, registerServiceWorker, isIOS as isIOSDevice, isStandalone, deviceLabel } from './push.js';
 
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
 const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['reminder', '⏰ Påmindelse før festen']];
 
@@ -63,12 +63,13 @@ const EVENT_ICONS = [[/forret|starter|suppe/i, '🥗'], [/hovedret|middag|aftens
   [/drink|velkomst|vin|øl|bobler/i, '🥂'], [/natmad|snack/i, '🌭'],
   [/leg|spil|aktivitet|quiz|lege/i, '🎲'], [/musik|dans|fest/i, '🎶'], [/tale|sang/i, '🎤']];
 const eventIcon = ev => (EVENT_ICONS.find(([re]) => re.test(ev.title)) || [0, ev.kind === 'program' ? '⏰' : '🍽️'])[1];
+const STATUS = { yes: ['✅', 'Kommer', 'kommer'], maybe: ['🤔', 'Kommer måske', 'kommer måske'], no: ['❌', 'Kommer ikke', 'kommer ikke'] };
 const ITEM_KINDS = { ret: ['🍽️', 'Ret'], aktivitet: ['🎲', 'Aktivitet'], andet: ['🎁', 'Andet'], udgift: ['🧾', 'Udgift'] };
 
 // ───────────────────────────── Tilstand ─────────────────────────────
 let store;
 const S = {
-  view: 'home', pid: null, party: undefined, events: [], participants: [], items: [],
+  view: 'home', pid: null, party: undefined, events: [], participants: [], items: [], households: [],
   loaded: {}, admin: false, tab: 'program', unsubs: [], error: null, justCreated: false,
 };
 window.__sg = S; // til fejlsøgning/tests
@@ -79,6 +80,17 @@ const me = () => S.participants.find(p => p.id === myId()) || null;
 const pById = id => S.participants.find(p => p.id === id);
 const pName = id => pById(id)?.name || 'Ukendt';
 const canEditItem = it => it.ownerUid === store.uid || S.admin;
+// Husstande
+const hhById = id => (id && S.households.find(h => h.id === id)) || null;
+const hhOfP = p => hhById(p?.householdId);
+const isMemberOf = hid => !!hhById(hid)?.memberUids?.includes(store.uid);
+const unclaimed = p => !p.ownerUid;
+/** Må jeg rette personen? Værten alt; ejeren sig selv; husstandsmedlemmer personer uden bruger. */
+const canEditPerson = p => !!p && (S.admin || p.ownerUid === store.uid || (unclaimed(p) && isMemberOf(p.householdId)));
+// Serverens regler kender endnu ikke husstande (gammel regelversion) → skjul husstande/status/„Det er mig“
+const hhOn = () => !S.hhDenied;
+const householdMembers = hid => sortedPeople().filter(p => p.householdId === hid);
+const firstName = n => String(n || '').split(' ')[0];
 const sortedEvents = () => [...S.events].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || (a.createdAt ?? 0) - (b.createdAt ?? 0));
 const sortedPeople = () => [...S.participants].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || a.id.localeCompare(b.id));
 
@@ -107,7 +119,7 @@ async function route() {
 function stopWatching() { S.unsubs.forEach(u => u()); S.unsubs = []; }
 function startWatching(pid) {
   stopWatching();
-  Object.assign(S, { pid, party: undefined, events: [], participants: [], items: [], loaded: {}, admin: false, error: null, tab: 'program' });
+  Object.assign(S, { pid, party: undefined, events: [], participants: [], items: [], households: [], loaded: {}, admin: false, error: null, tab: 'program', hhDenied: false });
   const onErr = what => e => { console.warn(what, e); S.error = errMsg(e); render(); };
   S.unsubs.push(store.watchParty(pid, async party => {
     if (party) party.id = pid;
@@ -129,6 +141,9 @@ function startWatching(pid) {
   for (const sub of ['events', 'participants', 'items']) {
     S.unsubs.push(store.watchSub(pid, sub, docs => { S[sub] = docs; S.loaded[sub] = true; render(); }, onErr(sub)));
   }
+  // Husstande: fejler stille (fx hvis serverens regler endnu ikke kender husstande) – så er alle deres egen husstand.
+  S.unsubs.push(store.watchSub(pid, 'households', docs => { S.households = docs; S.loaded.households = true; render(); },
+    e => { console.warn('husstande', e?.code || e); S.households = []; S.hhDenied = true; S.loaded.households = true; render(); }));
 }
 
 // ───────────────────────────── Render ─────────────────────────────
@@ -213,6 +228,7 @@ function partyView() {
       ${p.place ? `<div class="row"><span class="ic">📍</span><span>${esc(p.place)} · <a href="${esc(mapsUrl(p.place))}" target="_blank" rel="noopener">Vis på kort</a></span></div>` : ''}
     </div>
     ${p.note ? `<div class="note">${esc(p.note)}</div>` : ''}
+    ${heroCount()}
     <div class="row-actions">
       <button class="btn sm yellow" data-act="tab" data-tab="del">🔗 Inviter gæster</button>
       ${S.admin ? `<button class="btn sm" data-act="edit-party" data-t="edit-party">✏️ Ret gildet</button>` : ''}
@@ -224,16 +240,35 @@ function partyView() {
   <nav class="tabbar"><div class="tabbar-in">${tabs.map(([k, i, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}" data-t="tab-${k}"><i>${i}</i>${l}</button>`).join('')}</div></nav>`;
 }
 
+function heroCount() {
+  if (!S.loaded.participants || !S.participants.length) return '';
+  const c = headcount(S.participants);
+  const n = o => o.adults + o.children;
+  return `<div class="hc-line" data-t="hero-count"><span>👥 <b>${n(c.yes)}</b> kommer</span>${n(c.maybe) ? `<span>🤔 <b>${n(c.maybe)}</b> måske</span>` : ''}${n(c.no) ? `<span>❌ <b>${n(c.no)}</b> kommer ikke</span>` : ''}</div>`;
+}
+
+function rsvpSeg(p, small = false) {
+  const st = statusOf(p);
+  return `<div class="seg rsvp${small ? ' sm' : ''}" data-t="rsvp" data-id="${p.id}">${Object.entries(STATUS).map(([k, [ic, l]]) =>
+    `<button type="button" data-act="rsvp" data-id="${p.id}" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="rsvp-${k}" aria-pressed="${st === k}" aria-label="${l}">${ic} ${(small ? { yes: 'Ja', maybe: 'Måske', no: 'Nej' } : { yes: 'Kommer', maybe: 'Måske', no: 'Kommer ikke' })[k]}</button>`).join('')}</div>`;
+}
+
 function identityBar() {
   if (!S.loaded.participants) return '';
   const m = me();
-  if (m) return `<div class="me" data-t="me">${avatar(m)}<div class="grow"><div class="small muted">Du er tilmeldt som</div><b>${esc(m.name)}</b>
-    <div><button class="linkbtn small" data-act="not-me" data-t="not-me">Jeg er ikke ${esc(m.name.split(' ')[0])}</button></div></div>
-    ${m.ownerUid === store.uid ? '<button class="btn sm ghost" data-act="edit-me" aria-label="Ret mine oplysninger">✏️ Ret</button>' : ''}</div>`;
+  if (m) {
+    const hh = hhOfP(m);
+    return `<div class="me col" data-t="me"><div class="me-row">${avatar(m)}<div class="grow"><div class="small muted">Du er tilmeldt som</div><b>${esc(m.name)}</b>
+    <div class="small">${!hhOn() ? '' : hh ? `🏠 <button class="linkbtn small" data-act="tab" data-tab="gaester" data-t="me-household">${esc(hh.name)}</button>` : `<button class="linkbtn small" data-act="household-sheet" data-t="me-no-household">🏠 Kommer du med nogen? Opret husstand</button>`}</div>
+    <div><button class="linkbtn small" data-act="not-me" data-t="not-me">Jeg er ikke ${esc(firstName(m.name))}</button></div></div>
+    ${m.ownerUid === store.uid ? '<button class="btn sm ghost" data-act="edit-me" aria-label="Ret mine oplysninger">✏️ Ret</button>' : ''}</div>
+    ${hhOn() ? rsvpSeg(m) : ''}</div>`;
+  }
   const prof = LS.get('sg:profile', {});
   const mineHere = S.participants.filter(p => p.ownerUid === store.uid);
-  return `<form class="card join" id="join-form" autocomplete="on">
-    <h2>Hvem er du? 👋</h2>
+  const claimable = claimableAdults();
+  return `${claimable.length && !S.skipClaim ? claimCard(claimable) : ''}<form class="card join" id="join-form" autocomplete="on">
+    <h2>${claimable.length && !S.skipClaim ? 'Ellers: tilmeld dig som ny' : 'Hvem er du? 👋'}</h2>
     <p class="small muted" style="margin:4px 0 0">Skriv dit navn og telefonnummer, så de andre kan se hvem du er (og betale dig tilbage via MobilePay).</p>
     ${mineHere.length ? `<div class="chips" style="margin-top:10px">${mineHere.map(p => `<button type="button" class="chip solid" data-act="be" data-id="${p.id}">Jeg er ${esc(p.name)}</button>`).join('')}</div>` : ''}
     <label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required autocomplete="name" value="${esc(prof.name || '')}" placeholder="Dit navn"></label>
@@ -243,11 +278,22 @@ function identityBar() {
   </form>`;
 }
 
+const claimableAdults = () => hhOn() ? sortedPeople().filter(p => unclaimed(p) && !p.isChild) : [];
+function claimCard(list) {
+  return `<div class="card claim" data-t="claim-card"><h2>Er du en af disse? 👋</h2>
+    <p class="small muted" style="margin:4px 0 8px">Nogen har allerede skrevet dig på. Tryk „Det er mig“, så overtager du din plads – med det, der allerede står på dig.</p>
+    <ul class="people">${list.map(p => `<li class="person" data-t="claim-person">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}</div>
+      <div class="small muted">${hhOfP(p) ? '🏠 ' + esc(hhOfP(p).name) : ''}${p.addedByUid ? ` · skrevet på af ${esc(adderName(p))}` : ''}</div></div>
+      <button class="btn sm green" data-act="claim" data-id="${p.id}" data-t="claim">Det er mig</button></li>`).join('')}</ul>
+    <p class="small muted" style="margin:10px 0 0">Ikke dig? <button class="linkbtn small" data-act="skip-claim" data-t="skip-claim">Nej, jeg er ny</button></p></div>`;
+}
+const adderName = p => S.participants.find(x => x.ownerUid && x.ownerUid === p.addedByUid)?.name || 'en anden gæst';
+
 function itemRow(it) {
   const [ic] = ITEM_KINDS[it.kind] || ITEM_KINDS.ret;
   const bits = [esc(pName(it.participantId))];
   if (it.servings) bits.push(`til ${it.servings} pers.`);
-  if (it.cost) bits.push(`<span class="cost">${formatKr(it.cost)}</span> ${it.split === 'selected' ? `(deles af ${(it.among || []).filter(pById).length})` : '(deles af alle)'}`);
+  if (it.cost) bits.push(`<span class="cost">${formatKr(it.cost)}</span> (${splitText(it, true)})`);
   const mine = it.participantId === myId();
   return `<li class="item${mine ? ' mine' : ''}" data-t="item"><span class="it-ic">${ic}</span><div class="grow">
     <div class="t">${esc(it.title)}</div><div class="s">${bits.join(' · ')}</div>${it.note ? `<div class="n">${esc(it.note)}</div>` : ''}</div>
@@ -291,64 +337,141 @@ function programTab() {
 function guestsTab() {
   const ps = sortedPeople();
   if (!ps.length) return `<div class="card empty"><div class="big">👥</div><p>Ingen er tilmeldt endnu. Del linket med gæsterne!</p><button class="btn yellow" data-act="tab" data-tab="del">🔗 Inviter gæster</button></div>`;
-  return `<div class="card"><h2>Gæster (${ps.length})</h2><ul class="people" style="margin-top:8px">
-    ${ps.map(p => {
-      const its = S.items.filter(i => i.participantId === p.id && i.kind !== 'udgift');
-      const host = p.ownerUid === S.party.creatorUid;
-      return `<li class="person" data-t="person">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}${p.id === myId() ? '<span class="tag">dig</span>' : ''}${host ? '<span class="tag host">vært</span>' : ''}</div>
-        <div class="small muted">${p.phone ? `<a href="tel:${esc(cleanPhone(p.phone))}">${esc(prettyPhone(p.phone))}</a>` : 'Intet nummer'}${its.length ? ' · ' + its.map(i => esc(i.title)).join(', ') : ''}</div></div>
-        ${S.admin && p.id !== myId() ? `<button class="btn sm ghost" data-act="remove-person" data-id="${p.id}" aria-label="Fjern">✕</button>` : ''}</li>`;
-    }).join('')}</ul></div>`;
+  const c = headcount(ps);
+  const cnt = o => `${o.adults} ${o.adults === 1 ? 'voksen' : 'voksne'}${o.children ? ` · ${o.children} ${o.children === 1 ? 'barn' : 'børn'}` : ''}`;
+  const units = unitsOf(ps, S.households);
+  const hhUnits = units.filter(u => u.household), solos = units.filter(u => !u.household);
+  const m = me();
+  return `<div class="card" data-t="headcount"><h2>Gæsteliste</h2>
+    <div class="hc" style="margin-top:10px">
+      <div class="hc-yes"><b data-t="hc-yes">${c.yes.adults + c.yes.children}</b><span>✅ Kommer</span><small>${cnt(c.yes)}</small></div>
+      <div class="hc-maybe"><b data-t="hc-maybe">${c.maybe.adults + c.maybe.children}</b><span>🤔 Måske</span><small>${cnt(c.maybe)}</small></div>
+      <div class="hc-no"><b data-t="hc-no">${c.no.adults + c.no.children}</b><span>❌ Kommer ikke</span><small>${cnt(c.no)}</small></div>
+    </div></div>
+  ${m && hhOn() ? myHouseholdCard(m) : ''}
+  ${hhUnits.map(u => householdCard(u)).join('')}
+  ${solos.length ? `<div class="card" data-t="solo-card"><h3>${hhUnits.length ? 'Uden husstand' : `Gæster (${ps.length})`}</h3><ul class="people" style="margin-top:6px">${solos.map(u => personRow(u.members[0])).join('')}</ul></div>` : ''}`;
+}
+
+function personRow(p) {
+  const its = S.items.filter(i => i.participantId === p.id && i.kind !== 'udgift');
+  const host = p.ownerUid && p.ownerUid === S.party.creatorUid;
+  const st = statusOf(p), edit = canEditPerson(p), mine = p.id === myId();
+  const info = [p.phone ? `<a href="tel:${esc(cleanPhone(p.phone))}">${esc(prettyPhone(p.phone))}</a>` : (unclaimed(p) ? `skrevet på af ${esc(adderName(p))}` : 'Intet nummer')];
+  if (its.length) info.push(its.map(i => esc(i.title)).join(', '));
+  return `<li class="person${st === 'no' ? ' is-no' : ''}" data-t="person" data-name="${esc(p.name)}">${avatar(p)}<div class="grow"><div class="nm">${esc(p.name)}${mine ? '<span class="tag">dig</span>' : ''}${host ? '<span class="tag host">vært</span>' : ''}${p.isChild ? '<span class="tag kid">barn</span>' : ''}</div>
+      <div class="small muted">${info.join(' · ')}</div>
+      ${!hhOn() ? '' : edit && !mine ? rsvpSeg(p, true) : `<div class="st st-${st}" data-t="status">${STATUS[st][0]} ${STATUS[st][1]}</div>`}</div>
+      ${edit && !mine && hhOn() ? `<button class="btn sm ghost" data-act="edit-person" data-id="${p.id}" data-t="edit-person" aria-label="Ret ${esc(p.name)}">✏️</button>`
+        : edit && !mine ? `<button class="btn sm ghost" data-act="remove-person" data-id="${p.id}" data-t="remove-person" aria-label="Fjern">✕</button>` : ''}</li>`;
+}
+
+function householdCard(u) {
+  const h = u.household, m = me();
+  const coming = u.members.filter(p => statusOf(p) !== 'no').length;
+  const canJoin = m && m.householdId !== h.id && m.ownerUid === store.uid;
+  return `<div class="card hh" data-t="household" data-name="${esc(h.name)}"><div class="hh-head"><span class="hh-ic">🏠</span><div class="grow"><h3>${esc(h.name)}</h3>
+    <div class="small muted">${u.members.length} ${u.members.length === 1 ? 'person' : 'personer'} · ${coming} kommer</div></div>
+    ${canJoin ? `<button class="btn sm" data-act="join-household" data-id="${h.id}" data-t="join-household">Tilføj mig</button>` : ''}</div>
+    <ul class="people" style="margin-top:6px">${u.members.map(personRow).join('')}</ul>
+    ${isMemberOf(h.id) || S.admin ? `<div class="ev-foot"><button class="addbtn" data-act="add-member" data-id="${h.id}" data-t="add-member">+ Tilføj person (partner, barn …)</button>
+      <div class="hh-links"><button class="linkbtn small" data-act="rename-household" data-id="${h.id}" data-t="rename-household">✏️ Omdøb</button>
+      ${m && m.householdId === h.id && m.ownerUid === store.uid ? `<button class="linkbtn small" data-act="leave-household" data-t="leave-household">Meld mig ud</button>` : ''}</div></div>` : ''}</div>`;
+}
+
+function myHouseholdCard(m) {
+  const hh = hhOfP(m);
+  if (hh) return '';   // vises som almindeligt husstandskort med knapper
+  if (m.ownerUid !== store.uid) return '';
+  const others = S.households;
+  return `<div class="card" data-t="my-household"><h3>🏠 Kommer du med nogen?</h3>
+    <p class="small muted" style="margin:4px 0 0">Lav en husstand, og skriv partner, børn eller andre på, som ikke selv har appen. Husstanden får ét samlet regnskab.</p>
+    <div class="row-actions"><button class="btn sm primary" data-act="household-sheet" data-t="open-household">🏠 Opret husstand</button>
+    ${others.length ? `<button class="btn sm" data-act="household-sheet" data-t="open-join">Tilføj mig til en husstand</button>` : ''}</div></div>`;
+}
+
+function splitText(it, short = false) {
+  if (it.split === 'households') {
+    const n = (it.among || []).length;
+    return n ? `deles pr. husstand mellem ${n}` : 'deles pr. husstand';
+  }
+  if (it.split === 'selected') {
+    const ids = (it.among || []).filter(pById);
+    return short ? `deles af ${ids.length}` : 'deles af ' + ids.map(pName).map(esc).join(', ');
+  }
+  return 'deles af alle';
 }
 
 function computeSettlement() {
   const ps = sortedPeople();
   const costs = S.items.filter(i => i.cost > 0).map(i => ({ id: i.id, title: i.title, payer: i.participantId, amount: i.cost, split: i.split || 'all', among: i.among || [] }));
-  return { ps, r: settle(ps, costs) };
+  return { ps, r: settle(ps, costs, S.households) };
+}
+/** Navn på en husstand/enhed i regnskabet: "Familien Wriedt" + dem med bruger; enkeltpersoner med navn. */
+function unitLabel(u) {
+  if (!u) return { name: 'Ukendt', sub: '' };
+  if (!u.household) return { name: u.members[0]?.name || u.name, sub: '' };
+  const users = u.members.filter(m => m.ownerUid);
+  return { name: u.household.name, sub: (users.length ? users : u.members).map(m => firstName(m.name)).join(', ') };
+}
+/** Hvem i husstanden skal have pengene? Den, der har lagt mest ud (med telefon), ellers en med bruger og telefon. */
+function payeeOf(u, r) {
+  const paid = {};
+  for (const e of r.entries) if (e.payerUnit === u.id) paid[e.payer] = (paid[e.payer] || 0) + e.amount;
+  const withPhone = u.members.filter(m => m.phone);
+  return withPhone.sort((a, b) => (paid[b.id] || 0) - (paid[a.id] || 0) || (b.ownerUid ? 1 : 0) - (a.ownerUid ? 1 : 0))[0] || u.members.find(m => m.ownerUid) || u.members[0];
 }
 
 function moneyTab() {
   const { ps, r } = computeSettlement();
   const meId = myId();
+  const meUnit = meId ? r.unitOf[meId] : null;
   const party = S.party;
+  const unit = id => r.units.find(u => u.id === id);
   const costItems = S.items.filter(i => i.cost > 0).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
   const addBtn = `<button class="btn block" data-act="new-item" data-event="" data-kind="udgift" data-t="add-expense">🧾 Tilføj en udgift (vin, leje, indkøb …)</button>`;
-  if (!r.total) return `<div class="card empty"><div class="big">💰</div><p>Ingen udgifter endnu. Når nogen skriver en pris på det, de tager med, eller tilføjer en udgift, regner appen ud hvem der skylder hvem.</p>${addBtn}</div>`;
+  if (!r.total) return `<div class="card empty"><div class="big">💰</div><p>Ingen udgifter endnu. Når nogen skriver en pris på det, de tager med, eller tilføjer en udgift, regner appen ud hvem der skylder hvem – samlet pr. husstand.</p>${addBtn}</div>`;
+  const hasHh = r.units.some(u => u.household);
   const transfers = r.transfers.map(t => {
-    const to = pById(t.to), from = pById(t.from);
-    const cls = t.from === meId ? 'me-pay' : t.to === meId ? 'me-get' : '';
+    const fromU = unit(t.from), toU = unit(t.to);
+    const fl = unitLabel(fromU), tl = unitLabel(toU);
+    const to = payeeOf(toU, r);
+    const cls = t.from === meUnit ? 'me-pay' : t.to === meUnit ? 'me-get' : '';
     const kr = (t.amount / 100).toFixed(2);
     const mpPhone = mobilepayPhone(to?.phone);
     const comment = `Sammenskud: ${party.name}`.slice(0, 60);
     const mp = `mobilepay://send?phone=${encodeURIComponent(mpPhone)}&amount=${kr}&comment=${encodeURIComponent(comment)}&lock=1`;
-    const sms = `sms:${cleanPhone(to?.phone)}${isApple ? '&' : '?'}body=${encodeURIComponent(`Hej ${to?.name}! Jeg har sendt ${formatKr(t.amount)} for ${party.name} 🙂`)}`;
+    const sms = `sms:${cleanPhone(to?.phone)}${isApple ? '&' : '?'}body=${encodeURIComponent(`Hej ${firstName(to?.name)}! Jeg har sendt ${formatKr(t.amount)} for ${party.name} 🙂`)}`;
+    const who = (u, l) => `<span class="tr-party">${avatar({ id: u.id, name: l.name })}<span><b>${esc(l.name)}</b>${l.sub ? `<small>${esc(l.sub)}</small>` : ''}</span></span>`;
     return `<div class="transfer ${cls}" data-t="transfer">
-      ${cls === 'me-pay' ? '<div class="tr-who">Du skal betale</div>' : cls === 'me-get' ? '<div class="tr-who">Du skal have</div>' : ''}
-      <div class="tr-line">${avatar(from)} ${esc(from?.name)} <span class="muted">→</span> ${avatar(to)} ${esc(to?.name)}<span class="tr-amt mono">${formatKr(t.amount)}</span></div>
-      ${to?.phone ? `<div class="small muted" style="margin-top:6px">MobilePay til <b class="mono" style="color:var(--ink)">${esc(prettyPhone(to.phone))}</b> · beløb <b class="mono" style="color:var(--ink)">${formatKr(t.amount)}</b></div>
+      ${cls === 'me-pay' ? `<div class="tr-who">${fromU.household ? 'I skal betale' : 'Du skal betale'}</div>` : cls === 'me-get' ? `<div class="tr-who">${toU.household ? 'I skal have' : 'Du skal have'}</div>` : ''}
+      <div class="tr-line">${who(fromU, fl)} <span class="muted">→</span> ${who(toU, tl)}<span class="tr-amt mono">${formatKr(t.amount)}</span></div>
+      ${to?.phone ? `<div class="small muted" style="margin-top:6px">MobilePay til <b style="color:var(--ink)">${esc(firstName(to.name))}</b> på <b class="mono" style="color:var(--ink)">${esc(prettyPhone(to.phone))}</b> · beløb <b class="mono" style="color:var(--ink)">${formatKr(t.amount)}</b></div>
       <div class="tr-actions">
         <button class="btn sm" data-act="copy" data-text="${esc(mpPhone)}" data-msg="Nummeret ${esc(prettyPhone(to.phone))} er kopieret">📋 Kopiér nr.</button>
         <button class="btn sm" data-act="copy" data-text="${esc(kr.replace('.', ','))}" data-msg="Beløbet ${esc(formatKr(t.amount))} er kopieret">📋 Kopiér beløb</button>
-        ${t.from === meId || !meId ? `<a class="btn sm mp full" href="${esc(mp)}" data-act="mobilepay">Åbn MobilePay</a>` : ''}
-        ${t.from === meId ? `<a class="btn sm ghost full" href="${esc(sms)}">💬 Send SMS til ${esc(to.name.split(' ')[0])}</a>` : ''}
-      </div>` : '<div class="small muted" style="margin-top:6px">Modtageren har ikke skrevet et telefonnummer.</div>'}
+        ${t.from === meUnit || !meId ? `<a class="btn sm mp full" href="${esc(mp)}" data-act="mobilepay">Åbn MobilePay</a>` : ''}
+        ${t.from === meUnit ? `<a class="btn sm ghost full" href="${esc(sms)}">💬 Send SMS til ${esc(firstName(to.name))}</a>` : ''}
+      </div>` : '<div class="small muted" style="margin-top:6px">Ingen i den husstand har skrevet et telefonnummer.</div>'}
     </div>`;
   }).join('');
+  const coming = ps.filter(p => statusOf(p) !== 'no').length || ps.length;
   return `<div class="card" data-t="summary"><h2>Regnskab</h2>
-    <div class="bigsum" style="margin-top:10px"><div><b class="mono" data-t="total">${formatKr(r.total)}</b><span>i alt</span></div><div><b>${ps.length}</b><span>deltagere</span></div><div><b class="mono">${formatKr(Math.round(r.total / Math.max(1, ps.length)))}</b><span>gns. pr. person</span></div></div>
+    <div class="bigsum" style="margin-top:10px"><div><b class="mono" data-t="total">${formatKr(r.total)}</b><span>i alt</span></div><div><b>${r.units.length}</b><span>${hasHh ? 'husstande' : 'deltagere'}</span></div><div><b class="mono">${formatKr(Math.round(r.total / Math.max(1, coming)))}</b><span>gns. pr. person</span></div></div>
   </div>
   <div class="card"><h2>Hvem skylder hvem</h2>
+    ${hasHh ? '<p class="small muted" style="margin:4px 0 8px">Samlet pr. husstand – én overførsel pr. husstand.</p>' : ''}
     ${r.transfers.length ? transfers + `<p class="small muted" style="margin:12px 0 0">„Åbn MobilePay“ forsøger at åbne appen med nummer og beløb udfyldt. MobilePay understøtter ikke dette officielt – sker der ikke noget, så kopiér nummeret og beløbet.</p>` : '<p class="muted">Alle er kvit – ingen skylder noget. 🎉</p>'}
   </div>
-  <div class="card"><h2>Pr. person</h2>
-    <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>Navn</th><th>Betalt</th><th>Andel</th><th>Saldo</th></tr></thead><tbody>
-    ${ps.map(p => { const b = r.balance[p.id]; return `<tr><td>${esc(p.name)}${p.id === meId ? ' <span class="tag">dig</span>' : ''}</td><td>${formatKr(r.paid[p.id])}</td><td>${formatKr(r.share[p.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
+  <div class="card"><h2>${hasHh ? 'Pr. husstand' : 'Pr. person'}</h2>
+    <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>${hasHh ? 'Husstand' : 'Navn'}</th><th>Betalt</th><th>Andel</th><th>Saldo</th></tr></thead><tbody>
+    ${r.units.map(u => { const b = r.balance[u.id], l = unitLabel(u); return `<tr data-t="unit-row" data-unit="${esc(u.id)}"><td>${esc(l.name)}${u.id === meUnit ? ' <span class="tag">dig</span>' : ''}${u.household ? `<div class="small muted">${u.members.length} pers.</div>` : ''}</td><td>${formatKr(r.paid[u.id])}</td><td>${formatKr(r.share[u.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
     </tbody></table>
-    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
+    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ er pr. person (børn tæller med), men ikke dem, der har meldt „Kommer ikke“. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
   </div>
   <div class="card"><h2>Udgifter</h2><ul class="items" style="padding:0;margin-top:6px">
     ${costItems.map(i => `<li class="item"><span class="it-ic">${(ITEM_KINDS[i.kind] || ITEM_KINDS.ret)[0]}</span><div class="grow"><div class="t">${esc(i.title)}</div>
-      <div class="s">Betalt af ${esc(pName(i.participantId))} · ${i.split === 'selected' ? 'deles af ' + (i.among || []).filter(pById).map(pName).map(esc).join(', ') : 'deles af alle'}</div></div>
+      <div class="s">Betalt af ${esc(pName(i.participantId))} · ${splitText(i)}</div></div>
       <span class="cost">${formatKr(i.cost)}</span>${canEditItem(i) ? `<button class="btn sm ghost" data-act="edit-item" data-id="${i.id}" aria-label="Ret">✏️</button>` : ''}</li>`).join('')}
   </ul><div style="margin-top:12px">${addBtn}</div></div>`;
 }
@@ -394,7 +517,10 @@ function helpSheet() {
       <li><b>Del linket</b> (eller QR-koden) med gæsterne. Linket er langt og hemmeligt – kun dem, der har det, kan finde gildet.</li>
       <li><b>Del gildet op</b> i retter (forret, hovedret, dessert) eller programpunkter med tid (14:00 Kaffe, 18:00 Middag).</li>
       <li><b>Gæsterne tilmelder sig</b> med navn og telefonnummer og skriver på, hvad de tager med – hvor mange det rækker til, en note og evt. hvad det kostede.</li>
-      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle eller udvalgte. Appen viser hvem der har betalt hvad, hver persons andel, og det mindst mulige antal overførsler.</li>
+      <li><b>Kommer du?</b> Tryk ✅ Kommer, 🤔 Måske eller ❌ Kommer ikke. Under 👥 Gæster ses hvor mange voksne og børn der kommer.</li>
+      <li><b>Husstand:</b> Kommer du med partner, børn eller søskende, så tryk „🏠 Kommer du med nogen?“ og opret en husstand (fx „Familien Hansen“). Skriv dem på, selvom de ikke selv har appen – med navn, evt. telefon, og om det er et barn. Er din familie allerede skrevet på, så tryk „Tilføj mig“ ved deres husstand.</li>
+      <li><b>„Det er mig“:</b> Har en anden skrevet dig på, så åbn linket og tryk „Det er mig“ ved dit navn. Så overtager du pladsen, og det der står på dig følger med.</li>
+      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle (pr. person – børn tæller med, men ikke dem der har meldt fra), pr. husstand (lige meget hver) eller mellem udvalgte. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
       <li><b>Betal med MobilePay:</b> Ved hver gæld står modtagerens nummer og beløbet, med knapper til at kopiere og til at forsøge at åbne MobilePay.</li>
     </ol>
     <h3>Godt at vide</h3>
@@ -402,6 +528,8 @@ function helpSheet() {
       <li>Alt opdateres live for alle, og gemmes online – også når appen er lukket.</li>
       <li>Telefonen husker, hvem du er. Er det ikke dig, så tryk „Jeg er ikke …“.</li>
       <li>Du kan rette og slette dine egne ting. Kun værten kan rette gildet og programmet.</li>
+      <li>Alle med bruger i en husstand kan rette og fjerne husstandens personer uden egen bruger og melde dem til og fra. Ingen kan rette en anden, der har sin egen bruger (undtagen værten).</li>
+      <li>Fjerner du en person, der har skrevet noget på, flyttes det over til dig, så regnskabet stadig passer.</li>
       <li>Værten kan gemme sit hemmelige værts-link under „Del“ for at kunne rette fra en anden enhed.</li>
       <li>Alle med linket kan se navne og telefonnumre – del det kun med gæsterne.</li>
       <li>Tip: Tryk „Føj til hjemmeskærm“ i browseren for at få appen som et ikon.</li>
@@ -446,10 +574,15 @@ function itemSheet(it, eventId = '', kind = 'ret') {
   const isExpense = kind === 'udgift';
   const ev = S.events.find(e => e.id === (it?.eventId ?? eventId));
   const split = it?.split || 'all';
-  const among = new Set(it?.among?.length ? it.among : S.participants.map(p => p.id));
+  const among = new Set(it?.split === 'selected' && it.among?.length ? it.among : S.participants.filter(p => statusOf(p) !== 'no').map(p => p.id));
+  const units = unitsOf(sortedPeople(), S.households);
+  const amongU = new Set(it?.split === 'households' && it.among?.length ? it.among : units.filter(u => u.members.some(p => statusOf(p) !== 'no')).map(u => u.id));
+  // Hvem tager det med / har betalt? Mig eller en i min husstand uden egen bruger.
+  const whoOpts = !it && m && isMemberOf(m.householdId) ? householdMembers(m.householdId).filter(p => p.id === m.id || unclaimed(p)) : [];
   openSheet(it ? (isExpense ? 'Ret udgift' : 'Ret bidrag') : (isExpense ? 'Ny udgift' : 'Jeg tager med …'), `<form id="item-form" autocomplete="off" data-id="${it?.id || ''}" data-event="${esc(it?.eventId ?? eventId)}">
     ${ev ? `<p class="muted small" style="margin:0 0 4px">Til: <b>${eventIcon(ev)} ${esc(ev.title)}</b></p>` : ''}
     ${it && it.participantId !== myId() ? `<p class="muted small" style="margin:0 0 4px">Tilhører: <b>${esc(pName(it.participantId))}</b></p>` : ''}
+    ${whoOpts.length > 1 ? `<label class="f"><span>${isExpense ? 'Hvem har betalt?' : 'Hvem tager det med?'}</span><select name="who" data-t="item-who">${whoOpts.map(p => `<option value="${p.id}" ${p.id === m.id ? 'selected' : ''}>${esc(p.name)}${p.id === m.id ? ' (mig)' : ''}</option>`).join('')}</select></label>` : ''}
     ${!isExpense ? `<div class="seg" data-seg="kind">${['ret', 'aktivitet', 'andet'].map(k => `<button type="button" data-v="${k}" class="${kind === k ? 'on' : ''}">${ITEM_KINDS[k][0]} ${ITEM_KINDS[k][1]}</button>`).join('')}</div>` : ''}
     <input type="hidden" name="kind" value="${kind}">
     <label class="f"><span>${isExpense ? 'Hvad er udgiften? *' : 'Hvad tager du med? *'}</span><input type="text" name="title" maxlength="100" required value="${esc(it?.title || '')}" placeholder="${isExpense ? 'F.eks. Vin og øl' : 'F.eks. Lasagne'}"></label>
@@ -458,10 +591,14 @@ function itemSheet(it, eventId = '', kind = 'ret') {
     <label class="f"><span>${isExpense ? 'Beløb i kr. *' : 'Udgift i kr. (valgfri)'}</span><input type="text" name="cost" inputmode="decimal" value="${it?.cost ? esc((it.cost / 100).toFixed(2).replace('.', ',')) : ''}" placeholder="F.eks. 149,95"></label>
     <div id="split-box" style="${it?.cost || isExpense ? '' : 'display:none'}">
       <label class="f"><span>Hvem skal dele udgiften?</span></label>
-      <div class="seg" data-seg="split"><button type="button" data-v="all" class="${split === 'all' ? 'on' : ''}">Alle deltagere</button><button type="button" data-v="selected" class="${split === 'selected' ? 'on' : ''}" data-t="split-selected">Udvalgte</button></div>
+      <div class="seg seg3" data-seg="split"><button type="button" data-v="all" class="${split === 'all' ? 'on' : ''}" data-t="split-all">Alle<small>pr. person</small></button><button type="button" data-v="households" class="${split === 'households' ? 'on' : ''}" data-t="split-households">Pr. husstand<small>lige meget hver</small></button><button type="button" data-v="selected" class="${split === 'selected' ? 'on' : ''}" data-t="split-selected">Udvalgte<small>personer</small></button></div>
       <input type="hidden" name="split" value="${split}">
+      <p class="small muted split-help" style="margin:6px 0 0">${SPLIT_HELP[split]}</p>
       <div class="checks" id="among" style="${split === 'selected' ? '' : 'display:none'}">
-        ${sortedPeople().map(p => `<label><input type="checkbox" name="among" value="${p.id}" ${among.has(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}
+        ${sortedPeople().map(p => `<label><input type="checkbox" name="among" value="${p.id}" ${among.has(p.id) ? 'checked' : ''}> ${esc(p.name)}${p.isChild ? ' <span class="tag kid">barn</span>' : ''}${statusOf(p) === 'no' ? ' <span class="small muted">(kommer ikke)</span>' : ''}</label>`).join('')}
+      </div>
+      <div class="checks" id="among-hh" style="${split === 'households' ? '' : 'display:none'}">
+        ${units.map(u => `<label><input type="checkbox" name="amongHh" value="${esc(u.id)}" ${amongU.has(u.id) ? 'checked' : ''}> ${u.household ? '🏠 ' : ''}${esc(unitLabel(u).name)} <span class="small muted">(${u.members.length} pers.)</span></label>`).join('')}
       </div>
     </div>
     <div class="err"></div>
@@ -471,6 +608,61 @@ function itemSheet(it, eventId = '', kind = 'ret') {
     const cost = $('[name=cost]', sheet);
     cost.addEventListener('input', () => { $('#split-box', sheet).style.display = cost.value.trim() || isExpense ? '' : 'none'; });
   });
+}
+
+const SPLIT_HELP = {
+  all: 'Deles lige pr. person mellem alle, der kommer (børn tæller som en person). Dem, der har meldt „Kommer ikke“, er ikke med.',
+  households: 'Hver husstand betaler lige meget, uanset hvor mange de er. Enlige tæller som en husstand.',
+  selected: 'Deles lige pr. person mellem dem, du vælger.',
+};
+
+// ── Husstande: ark ───────────────────────────────────────────────────────
+function householdSheet() {
+  const m = me(); if (!m) { toast('Tilmeld dig først'); return; }
+  const last = m.name.trim().split(/\s+/).slice(1).join(' ');
+  const others = S.households.filter(h => h.id !== m.householdId);
+  openSheet('Kommer du med nogen?', `
+    <p class="small muted" style="margin:0">En husstand er dig og dem, du kommer med – partner, børn, søskende. Du kan skrive dem på, selvom de ikke selv har appen, og I får ét samlet regnskab.</p>
+    <form id="household-form" autocomplete="off"><label class="f"><span>Navn på husstanden</span><input type="text" name="name" maxlength="60" required value="${last ? 'Familien ' + esc(last) : ''}" placeholder="F.eks. Familien Hansen"></label>
+    <div class="err"></div><div class="actions"><button class="btn primary" data-t="create-household">🏠 Opret husstand</button></div></form>
+    ${others.length ? `<h3 style="margin-top:18px">…eller tilføj dig til en husstand</h3><p class="small muted" style="margin:4px 0 8px">Er din partner eller familie allerede skrevet på? Så meld dig ind i deres.</p>
+      <div class="list-parties">${others.map(h => `<button class="rowbtn" data-act="join-household" data-id="${h.id}" data-t="join-household-row"><span style="font-size:22px">🏠</span><span class="grow"><b>${esc(h.name)}</b><br><span class="small muted">${householdMembers(h.id).map(p => esc(firstName(p.name))).join(', ') || 'ingen endnu'}</span></span><span class="chip solid">Tilføj mig</span></button>`).join('')}</div>` : ''}
+    <div class="actions"><button class="btn ghost" data-act="close-sheet">Nej, det er kun mig</button></div>`);
+}
+function renameSheet(hid) {
+  const h = hhById(hid);
+  openSheet('Omdøb husstand', `<form id="household-form" data-id="${hid}" autocomplete="off"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required value="${esc(h?.name || '')}"></label>
+    <div class="err"></div><div class="actions"><button class="btn primary">Gem</button></div></form>`);
+}
+/** Tilføj/ret en person i en husstand (eller ret en person som vært). */
+function personSheet(hid, p) {
+  const h = hhById(hid || p?.householdId);
+  const st = p ? statusOf(p) : 'yes';
+  const canChild = !p || unclaimed(p) || S.admin;
+  openSheet(p ? `Ret ${p.name}` : `Tilføj til ${h?.name || 'husstanden'}`, `<form id="person-form" data-id="${p?.id || ''}" data-hid="${esc(hid || '')}" autocomplete="off">
+    ${!p ? '<p class="small muted" style="margin:0">Til personer der ikke selv har appen – fx partner, børn eller søskende. Har de selv en telefon, kan de senere åbne linket og trykke „Det er mig“.</p>' : ''}
+    <label class="f"><span>Navn *</span><input type="text" name="name" maxlength="60" required value="${esc(p?.name || '')}" placeholder="F.eks. Sofie"></label>
+    <label class="f"><span>Telefonnummer (valgfrit)</span><input type="tel" name="phone" maxlength="20" inputmode="tel" value="${esc(p?.phone || '')}" placeholder="12 34 56 78"></label>
+    ${canChild ? `<div class="checks" style="max-height:none"><label><input type="checkbox" name="isChild" data-t="is-child" ${p?.isChild ? 'checked' : ''}> 🧒 Barn</label></div>` : ''}
+    <label class="f"><span>Kommer ${p ? esc(firstName(p.name)) : 'personen'}?</span></label>
+    <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${st === k ? 'on' : ''}" data-t="person-status-${k}">${ic} ${l}</button>`).join('')}</div>
+    <input type="hidden" name="status" value="${st}">
+    <div class="err"></div>
+    <div class="actions"><button class="btn primary" data-t="save-person">${p ? 'Gem' : 'Tilføj'}</button></div>
+    ${p && p.id !== myId() ? `<div class="actions"><button type="button" class="btn danger" data-act="remove-person" data-id="${p.id}" data-t="remove-person">🗑️ Fjern fra gildet</button></div>` : ''}
+  </form>`);
+}
+function claimSheet(p) {
+  const prof = LS.get('sg:profile', {});
+  const hh = hhOfP(p);
+  openSheet(`Er du ${p.name}?`, `<form id="claim-form" data-id="${p.id}" autocomplete="on">
+    <p class="small muted" style="margin:0">Så overtager du pladsen${hh ? ` i <b>${esc(hh.name)}</b>` : ''}. Alt der allerede står på ${esc(firstName(p.name))}, følger med. Skriv dit nummer, så de andre kan betale dig via MobilePay.</p>
+    <label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required autocomplete="name" value="${esc(p.name)}"></label>
+    <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required autocomplete="tel" inputmode="tel" value="${esc(p.phone || prof.phone || '')}" placeholder="12 34 56 78"></label>
+    <label class="f"><span>Kommer du?</span></label>
+    <div class="seg seg3" data-seg="status">${Object.entries(STATUS).map(([k, [ic, l]]) => `<button type="button" data-v="${k}" class="${statusOf(p) === k ? 'on' : ''}">${ic} ${l}</button>`).join('')}</div>
+    <input type="hidden" name="status" value="${statusOf(p)}">
+    <div class="err"></div><div class="actions"><button class="btn green" data-t="claim-save">✋ Ja, det er mig</button></div></form>`);
 }
 
 function meSheet(edit) {
@@ -484,6 +676,7 @@ function meSheet(edit) {
   }
   openSheet('Er du ikke ' + m.name + '?', `
     ${others.length ? `<p class="muted small">Personer tilmeldt fra denne telefon:</p><div class="chips">${others.map(p => `<button class="chip solid" data-act="be" data-id="${p.id}">Jeg er ${esc(p.name)}</button>`).join('')}</div>` : ''}
+    ${claimableAdults().length ? `<p class="muted small" style="margin-top:14px">Skrevet på af andre (uden egen bruger):</p><div class="chips">${claimableAdults().map(p => `<button class="chip" data-act="claim" data-id="${p.id}">Det er mig: ${esc(p.name)}</button>`).join('')}</div>` : ''}
     <p class="muted small" style="margin-top:14px">Er du en ny gæst på denne telefon, så tilmeld dig her:</p>
     <form id="switch-form"><label class="f"><span>Navn</span><input type="text" name="name" maxlength="60" required></label>
     <label class="f"><span>Telefonnummer</span><input type="tel" name="phone" maxlength="20" required inputmode="tel"></label><div class="err"></div>
@@ -703,6 +896,63 @@ async function presetEvents(which) {
   catch (e) { fail(e); }
 }
 
+// ── Husstande & status: handlinger ─────────────────────────────────────────
+const statusText = (name, st) => `${name} ${STATUS[st][2]}`;
+async function setStatus(p, st) {
+  if (!p || !STATUS[st] || statusOf(p) === st) return;
+  if (!canEditPerson(p)) { toast('Det kan kun personen selv, husstanden eller værten ændre'); return; }
+  try {
+    await store.update(S.pid, 'participants', p.id, { status: st });
+    const m = me();
+    store.logActivity(S.pid, 'guest', p.id === m?.id || !m ? statusText(p.name, st) : `${statusText(p.name, st)} (meldt af ${firstName(m.name)})`, { participantId: myId() || '' });
+    toast(`${p.id === myId() ? 'Du' : firstName(p.name)}: ${STATUS[st][1].toLowerCase()} ${STATUS[st][0]}`);
+  } catch (e) { fail(e); }
+}
+/** Hvad skal der ske med min gamle husstand, når jeg forlader den? */
+function leaveInfo(m, newHid) {
+  const old = m.householdId && hhById(m.householdId);
+  if (!old || old.id === newHid) return null;
+  const keepMember = S.participants.some(p => p.id !== m.id && p.ownerUid === store.uid && p.householdId === old.id);
+  const othersLeft = S.participants.some(p => p.id !== m.id && p.householdId === old.id);
+  const onlyMe = (old.memberUids || []).every(u => u === store.uid);
+  return { hid: old.id, keepMember, remove: !othersLeft && onlyMe && !keepMember };
+}
+async function joinHousehold(hid) {
+  const m = me(), h = hhById(hid); if (!m || !h) return;
+  if (m.ownerUid !== store.uid) { toast('Du kan kun melde dig selv ind'); return; }
+  const old = hhOfP(m);
+  if (old && !confirm(`Flyt dig fra ${old.name} til ${h.name}?`)) return;
+  try {
+    await store.joinHousehold(S.pid, hid, m.id, leaveInfo(m, hid));
+    store.logActivity(S.pid, 'guest', `${m.name} er med i ${h.name}`, { participantId: m.id });
+    closeSheet(); S.tab = 'gaester'; render(); toast(`Du er nu med i ${h.name} 🏠`);
+  } catch (e) { fail(e); }
+}
+async function leaveHousehold() {
+  const m = me(), h = hhOfP(m); if (!m || !h) return;
+  const rest = householdMembers(h.id).filter(p => p.id !== m.id);
+  const orphans = rest.length && rest.every(unclaimed) && (h.memberUids || []).every(u => u === store.uid);
+  if (!confirm(`Meld dig ud af ${h.name}?${orphans ? ` ${rest.map(p => firstName(p.name)).join(', ')} bliver stående, men så kan kun værten (eller en der melder sig ind) rette dem.` : ''}`)) return;
+  try { await store.leaveHousehold(S.pid, m.id, leaveInfo(m, '')); toast(`Du er meldt ud af ${h.name}`); } catch (e) { fail(e); }
+}
+/** Fjern en person. Har personen bidrag/udgifter, flyttes de over til mig (hvis jeg må), ellers stoppes der. */
+async function removePerson(p) {
+  if (!p) return;
+  if (!canEditPerson(p) || p.id === myId()) { toast('Det har du ikke lov til'); return; }
+  const its = S.items.filter(i => i.participantId === p.id);
+  const m = me();
+  if (its.length) {
+    const stuck = its.filter(i => !canEditItem(i));
+    if (stuck.length || !m) { alert(`${p.name} har ${its.length} ${its.length === 1 ? 'bidrag' : 'bidrag'} på listen${stuck.length ? `, som kun den, der skrev dem, eller værten kan flytte` : ''}. Flyt eller slet ${its.length === 1 ? 'det' : 'dem'} først.`); return; }
+    if (!confirm(`Fjern ${p.name}? ${firstName(p.name)} har ${its.length} ${its.length === 1 ? 'bidrag' : 'bidrag'} (${its.map(i => i.title).join(', ')}), som flyttes over til dig, så regnskabet stadig passer.`)) return;
+  } else if (!confirm(`Fjern ${p.name} fra gildet?`)) return;
+  try {
+    for (const i of its) await store.update(S.pid, 'items', i.id, { participantId: m.id });
+    await store.remove(S.pid, 'participants', p.id);
+    closeSheet(); toast(`${p.name} er fjernet`);
+  } catch (e) { fail(e); }
+}
+
 async function onClick(e) {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act, id = el.dataset.id;
@@ -728,7 +978,7 @@ async function onClick(e) {
     case 'delete-party':
       if (!confirm(`Slet "${S.party.name}" med alle retter, gæster og udgifter? Det kan ikke fortrydes.`)) return;
       try {
-        const lists = { events: S.events, participants: S.participants, items: S.items }, pid = S.pid;
+        const lists = { events: S.events, participants: S.participants, items: S.items, households: S.households }, pid = S.pid;
         stopWatching(); closeSheet();
         await store.deleteParty(pid, lists);
         LS.set('sg:parties', LS.get('sg:parties', []).filter(p => p.id !== pid)); LS.del(meKey(pid));
@@ -778,20 +1028,29 @@ async function onClick(e) {
       if (!mm) { toast('Det ligner ikke et link til et gilde'); return; }
       closeSheet(); location.hash = mm[0].slice(1); return;
     }
-    case 'remove-person': {
-      const p = pById(id); if (!confirm(`Fjern ${p.name} fra gildet? Deres bidrag bliver stående.`)) return;
-      try { await store.remove(S.pid, 'participants', id); toast(`${p.name} er fjernet`); } catch (err) { fail(err); }
-      return;
-    }
+    case 'remove-person': return removePerson(pById(id));
+    case 'rsvp': return setStatus(pById(id), el.dataset.v);
+    case 'claim': { const p = pById(id); if (p && unclaimed(p)) claimSheet(p); return; }
+    case 'skip-claim': S.skipClaim = true; render(); $('#join-form input')?.focus(); return;
+    case 'household-sheet': return householdSheet();
+    case 'join-household': return joinHousehold(id);
+    case 'leave-household': return leaveHousehold();
+    case 'rename-household': return renameSheet(id);
+    case 'add-member': return personSheet(id, null);
+    case 'edit-person': { const p = pById(id); if (p && canEditPerson(p)) personSheet(p.householdId, p); return; }
   }
 }
 
 function onSegClick(e) {
-  const b = e.target.closest('.seg button'); if (!b) return false;
+  const b = e.target.closest('.seg button'); if (!b || b.dataset.act) return false;
   const seg = b.parentElement, form = seg.closest('form');
   $$('button', seg).forEach(x => x.classList.toggle('on', x === b));
   form[seg.dataset.seg].value = b.dataset.v;
-  if (seg.dataset.seg === 'split') $('#among', form).style.display = b.dataset.v === 'selected' ? '' : 'none';
+  if (seg.dataset.seg === 'split') {
+    $('#among', form).style.display = b.dataset.v === 'selected' ? '' : 'none';
+    $('#among-hh', form).style.display = b.dataset.v === 'households' ? '' : 'none';
+    $('.split-help', form).textContent = SPLIT_HELP[b.dataset.v];
+  }
   if (form.id === 'notif-form') { saveNotifPrefs(form); return true; }
   if (form.id === 'event-form' && seg.dataset.seg === 'kind') form.title.placeholder = b.dataset.v === 'program' ? 'F.eks. Kaffe og kage' : 'F.eks. Tapas';
   return true;
@@ -810,6 +1069,48 @@ async function onSubmit(e) {
     });
   }
   if (f.id === 'join-form' || f.id === 'switch-form') return register(f);
+  if (f.id === 'household-form') {
+    const name = f.name.value.trim(); if (!name) return err('Giv husstanden et navn.');
+    const m = me(); if (!m) return err('Tilmeld dig først.');
+    return busy(async () => {
+      if (f.dataset.id) { await store.renameHousehold(S.pid, f.dataset.id, name); closeSheet(); toast('Gemt'); return; }
+      await store.createHousehold(S.pid, name, m.id, leaveInfo(m, 'ny'));
+      store.logActivity(S.pid, 'guest', `${m.name} har oprettet husstanden ${name}`, { participantId: m.id });
+      closeSheet(); S.tab = 'gaester'; render(); toast(`${name} er oprettet – tilføj dem, du kommer med 🏠`);
+    });
+  }
+  if (f.id === 'person-form') {
+    const name = f.name.value.trim(), phone = cleanPhone(f.phone.value);
+    if (!name) return err('Skriv et navn.');
+    if (phone && !isValidPhone(phone)) return err('Telefonnummeret ser forkert ud (8 cifre) – eller lad feltet stå tomt.');
+    const status = f.status.value, isChild = f.isChild ? f.isChild.checked : undefined;
+    return busy(async () => {
+      const who = me()?.name || 'Værten';
+      if (f.dataset.id) {
+        const old = pById(f.dataset.id);
+        await store.update(S.pid, 'participants', f.dataset.id, { name, phone, status, ...(isChild !== undefined ? { isChild } : {}) });
+        if (old && statusOf(old) !== status) store.logActivity(S.pid, 'guest', f.dataset.id === myId() ? statusText(name, status) : `${statusText(name, status)} (meldt af ${firstName(who)})`, { participantId: myId() || '' });
+        closeSheet(); toast('Gemt');
+      } else {
+        const h = hhById(f.dataset.hid);
+        await store.addMember(S.pid, f.dataset.hid, { name, phone, isChild: !!isChild, status });
+        store.logActivity(S.pid, 'guest', `${firstName(who)} har tilføjet ${name}${isChild ? ' (barn)' : ''} til ${h?.name || 'husstanden'}${status !== 'yes' ? ' – ' + STATUS[status][2] : ''}`, { participantId: myId() || '' });
+        closeSheet(); toast(`${name} er tilføjet`);
+      }
+    });
+  }
+  if (f.id === 'claim-form') {
+    const p = pById(f.dataset.id); if (!p || !unclaimed(p)) return err('Personen er allerede overtaget af en anden.');
+    const pr = readPerson(f); if (pr.err) return err(pr.err);
+    return busy(async () => {
+      await store.claim(S.pid, p, { ...pr, status: f.status.value });
+      LS.set(meKey(S.pid), p.id); LS.set('sg:profile', pr);
+      const hh = hhOfP(p);
+      store.logActivity(S.pid, 'guest', `${pr.name} er tilmeldt${hh ? ' (' + hh.name + ')' : ''}${f.status.value !== 'yes' ? ' – ' + STATUS[f.status.value][2] : ''}`, { participantId: p.id });
+      syncSubParticipant();
+      closeSheet(); toast(`Velkommen, ${firstName(pr.name)}! 🎉`); render();
+    });
+  }
   if (f.id === 'profile-form') {
     const p = readPerson(f); if (p.err) return err(p.err);
     LS.set('sg:profile', p); toast('Gemt'); closeSheet(); return;
@@ -851,17 +1152,23 @@ async function onSubmit(e) {
     if (kind === 'udgift' && !cost) return err('Skriv beløbet.');
     const servings = f.servings ? parseInt(f.servings.value, 10) || 0 : 0;
     const split = f.split.value;
-    const among = split === 'selected' ? $$('input[name=among]:checked', f).map(x => x.value) : [];
+    let among = split === 'selected' ? $$('input[name=among]:checked', f).map(x => x.value) : [];
+    if (split === 'households') {
+      const boxes = $$('input[name=amongHh]', f), on = boxes.filter(x => x.checked).map(x => x.value);
+      if (cost && !on.length) return err('Vælg mindst én husstand.');
+      among = on.length === boxes.length ? [] : on;   // alle valgt = alle husstande (også nye)
+    }
     if (cost && split === 'selected' && !among.length) return err('Vælg mindst én person.');
     const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost ? among : [] };
     return busy(async () => {
-      const who = me()?.name || 'Nogen';
+      const who = (f.who && f.who.value !== myId() ? pName(f.who.value) : me()?.name) || 'Nogen';
       if (f.dataset.id) {
         const old = S.items.find(x => x.id === f.dataset.id);
         await store.update(S.pid, 'items', f.dataset.id, data);
         if (old && (old.cost || 0) !== cost) store.logActivity(S.pid, 'cost', `${pName(old.participantId)}: udgiften for ${title} er nu ${formatKr(cost)}`, { participantId: myId() || '' });
       } else {
-        await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: myId() });
+        const forId = f.who?.value || myId();
+        await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: forId });
         const ev = S.events.find(x => x.id === f.dataset.event);
         const text = kind === 'udgift' ? `${who} har lagt ud for ${title} (${formatKr(cost)})`
           : kind === 'aktivitet' ? `${who} står for ${title}${ev ? ' (' + ev.title + ')' : ''}`
@@ -880,7 +1187,7 @@ document.addEventListener('change', e => { const f = e.target.closest('#notif-fo
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
 (async () => {
-  try { store = await createStore(); }
+  try { store = await createStore(); if (store.backend.kind !== 'firebase') window.__sgStore = store; }   // kun i emulator/mock (tests)
   catch (e) {
     console.error(e);
     $('#app').innerHTML = `<div class="wrap"><div class="card empty"><div class="big">🔌</div><h2>Kunne ikke forbinde</h2><p>${esc(errMsg(e))}</p><button class="btn" onclick="location.reload()">Prøv igen</button></div></div>`;

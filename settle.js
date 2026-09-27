@@ -37,35 +37,84 @@ export function splitAmount(amount, ids) {
   return out;
 }
 
+/** Deltagerstatus: 'yes' (kommer – standard), 'maybe', 'no'. Gamle deltagere uden status kommer. */
+export const statusOf = p => (p?.status === 'maybe' || p?.status === 'no') ? p.status : 'yes';
+
 /**
- * Beregn regnskab.
- * @param participants [{id, name}] – rækkefølgen bestemmer hvem der får ekstra øre ved skæv deling
- * @param costs [{payer, amount (øre), split: 'all'|'selected', among: [ids]}]
- * @returns {paid, share, balance, total, entries, transfers}
+ * Del deltagerne op i husstande ("enheder"). En deltager med householdId der peger på en kendt
+ * husstand hører til den; alle andre er deres egen husstand (enheds-id = deltagerens id).
+ * @returns [{id, name, household (doc|null), members: [participants]}] i deltagernes rækkefølge
+ */
+export function unitsOf(participants, households = []) {
+  const hh = new Map(households.map(h => [h.id, h]));
+  const units = new Map();
+  for (const p of participants) {
+    const h = p.householdId && hh.get(p.householdId);
+    const id = h ? h.id : p.id;
+    if (!units.has(id)) units.set(id, { id, name: h ? h.name : p.name, household: h || null, members: [] });
+    units.get(id).members.push(p);
+  }
+  return [...units.values()];
+}
+
+/** Optælling til gæstelisten: { yes: {adults, children}, maybe: {...}, no: {...} } */
+export function headcount(participants) {
+  const out = { yes: { adults: 0, children: 0 }, maybe: { adults: 0, children: 0 }, no: { adults: 0, children: 0 } };
+  for (const p of participants) out[statusOf(p)][p.isChild ? 'children' : 'adults']++;
+  return out;
+}
+
+/**
+ * Beregn regnskab – samlet pr. husstand.
+ * @param participants [{id, name, householdId?, isChild?, status?}] – rækkefølgen bestemmer hvem der får ekstra øre
+ * @param costs [{payer (deltager-id), amount (øre), split: 'all'|'selected'|'households', among: [ids]}]
+ *   'all'        – deles pr. person mellem alle, der ikke har meldt "Kommer ikke" (børn tæller som en person)
+ *   'selected'   – deles pr. person mellem de valgte deltagere (among = deltager-id'er)
+ *   'households' – lige stor andel pr. husstand; among = husstands-/enheds-id'er (tom = alle husstande med nogen der kommer)
+ * @param households [{id, name}] – husstands-dokumenter (valgfri; uden dem er alle deres egen husstand)
+ * @returns {units, unitOf, paid, share, balance, total, entries, transfers} – nøgler er enheds-id'er.
+ *   Uden husstande er enheds-id = deltager-id, så resultatet er det samme som et pr.-person-regnskab.
  *   balance > 0: skal have penge; balance < 0: skylder.
  */
-export function settle(participants, costs) {
-  const ids = participants.map(p => p.id);
-  const known = new Set(ids);
+export function settle(participants, costs, households = []) {
+  const units = unitsOf(participants, households);
+  const unitOf = {};
+  for (const u of units) for (const m of u.members) unitOf[m.id] = u.id;
+  const uids = units.map(u => u.id);
+  const pids = participants.map(p => p.id);
+  const known = new Set(pids);
+  const coming = participants.filter(p => statusOf(p) !== 'no').map(p => p.id);
   const paid = {}, share = {};
-  for (const id of ids) { paid[id] = 0; share[id] = 0; }
+  for (const id of uids) { paid[id] = 0; share[id] = 0; }
   let total = 0;
   const entries = [];
   for (const c of costs) {
     const amount = Math.round(c.amount || 0);
     if (!(amount > 0) || !known.has(c.payer)) continue;
-    let among = c.split === 'selected' && Array.isArray(c.among)
-      ? ids.filter(id => c.among.includes(id)) : ids.slice();
-    if (!among.length) among = ids.slice();   // alle valgte er meldt fra → fordel på alle
-    const parts = splitAmount(amount, among);
-    paid[c.payer] += amount;
-    for (const id in parts) share[id] += parts[id];
+    const allPeople = coming.length ? coming : pids.slice();
+    let perUnit;
+    let among;
+    if (c.split === 'households') {
+      const sel = Array.isArray(c.among) ? uids.filter(id => c.among.includes(id)) : [];
+      among = sel.length ? sel : uids.filter(id => units.find(u => u.id === id).members.some(m => statusOf(m) !== 'no'));
+      if (!among.length) among = uids.slice();
+      perUnit = splitAmount(amount, among);
+    } else {
+      among = c.split === 'selected' && Array.isArray(c.among) ? pids.filter(id => c.among.includes(id)) : allPeople;
+      if (!among.length) among = allPeople;   // alle valgte er fjernet → fordel på alle der kommer
+      const parts = splitAmount(amount, among);
+      perUnit = {};
+      for (const id in parts) perUnit[unitOf[id]] = (perUnit[unitOf[id]] || 0) + parts[id];
+    }
+    const payerUnit = unitOf[c.payer];
+    paid[payerUnit] += amount;
+    for (const id in perUnit) share[id] += perUnit[id];
     total += amount;
-    entries.push({ ...c, amount, among, parts });
+    entries.push({ ...c, amount, among, parts: perUnit, payerUnit });
   }
   const balance = {};
-  for (const id of ids) balance[id] = paid[id] - share[id];
-  return { paid, share, balance, total, entries, transfers: minimalTransfers(balance, ids) };
+  for (const id of uids) balance[id] = paid[id] - share[id];
+  return { units, unitOf, paid, share, balance, total, entries, transfers: minimalTransfers(balance, uids) };
 }
 
 /**

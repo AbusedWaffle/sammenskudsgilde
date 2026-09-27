@@ -17,6 +17,10 @@ rules_version = '2';
 //  • Alle der har linket kan se alt og tilføje sig selv, retter og udgifter.
 //    Kun opretteren kan rette/slette gildets detaljer og programpunkter.
 //    Man kan rette/slette sine egne deltager-/ret-poster (opretteren kan også).
+//  • Husstande: households/{id} med memberUids. Medlemmer af en husstand kan tilføje,
+//    rette og fjerne husstandens personer UDEN egen bruger (børn, partner …) og sætte
+//    deres status (kommer / kommer måske / kommer ikke). Ingen kan rette en anden
+//    person MED bruger (undtagen værten).
 //
 //  ÆRLIGE BEGRÆNSNINGER (det er en vennegruppe-app, ikke en bank)
 //  • Linket ER adgangen. Den, der får linket videresendt, kan se navne og
@@ -28,6 +32,9 @@ rules_version = '2';
 //  • Hvem-som-helst med linket kan oprette mange deltagere/poster (spam). Der er
 //    størrelsesgrænser på felterne, men ingen hastighedsbegrænsning. Overvej App Check,
 //    hvis det bliver et problem.
+//  • Alle med linket kan melde sig ind i en husstand (ingen godkendelse) og derefter
+//    rette dens personer uden bruger – og kan sige "Det er mig" til en voksen uden
+//    bruger. Det er et bevidst valg for en venne-app; værten kan rette alt tilbage.
 //  • Reglerne kan ikke garantere, at beløb er "rigtige" – kun at de er heltal i øre
 //    inden for et fornuftigt interval.
 //  • Når et gilde slettes, sletter appen først under-dokumenterne. Efterladte
@@ -104,19 +111,96 @@ service cloud.firestore {
         allow delete: if isAdmin(pid);
       }
 
+      // ── Husstande (Familien Wriedt …) ────────────────────────────────────────
+      // memberUids = uid'er på de brugere (enheder), der er med i husstanden. Den, der er med,
+      // kan rette navnet og husstandens medlemmer uden egen bruger. Alle kan melde SIG SELV ind
+      // eller ud (ingen godkendelse – det er en venne-app), men ingen kan fjerne andre brugere.
+      function validHousehold(d) {
+        return d.keys().hasOnly(['name', 'memberUids', 'createdByUid', 'createdAt'])
+          && d.keys().hasAll(['name', 'memberUids', 'createdByUid'])
+          && isStr(d.name, 1, 60) && d.memberUids is list && d.memberUids.size() <= 50
+          && d.createdByUid is string;
+      }
+      function onlySelfChanged() {
+        let n = request.resource.data.memberUids.toSet();
+        let o = resource.data.memberUids.toSet();
+        return n.difference(o).hasOnly([request.auth.uid]) && o.difference(n).hasOnly([request.auth.uid]);
+      }
+      match /households/{hid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid) && hid.size() >= 10
+          && validHousehold(request.resource.data)
+          && request.resource.data.createdByUid == request.auth.uid
+          && request.resource.data.memberUids == [request.auth.uid];
+        allow update: if signedIn() && validHousehold(request.resource.data)
+          && unchanged(['createdByUid', 'createdAt'])
+          && (isAdmin(pid)
+              || (onlySelfChanged()
+                  && (resource.data.memberUids.hasAny([request.auth.uid])            // medlem: omdøb / meld dig ud
+                      || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberUids']))));  // meld dig ind
+        allow delete: if signedIn() && (isAdmin(pid)
+          || (resource.data.memberUids.hasAny([request.auth.uid]) && resource.data.memberUids.hasOnly([request.auth.uid])));
+      }
+
       // ── Deltagere ────────────────────────────────────────────────────────────
+      // ownerUid = brugeren (enheden) der ejer deltageren. ownerUid == '' betyder "uden egen bruger"
+      // (fx et barn eller en partner, som et husstandsmedlem har tilføjet; addedByUid = hvem).
+      // Den, der åbner linket, kan overtage en voksen uden bruger ("Det er mig") – samme ID, så
+      // retter og udgifter følger med. Alle felter ud over name/phone/ownerUid er valgfri, så
+      // deltagere oprettet af den tidligere version af appen stadig er gyldige.
       function validParticipant(d) {
-        return d.keys().hasOnly(['name', 'phone', 'ownerUid', 'createdAt'])
-          && isStr(d.name, 1, 60) && isStr(d.phone, 0, 20) && d.ownerUid is string;
+        return d.keys().hasOnly(['name', 'phone', 'ownerUid', 'createdAt', 'householdId', 'isChild', 'status', 'addedByUid'])
+          && isStr(d.name, 1, 60) && isStr(d.phone, 0, 20) && d.ownerUid is string
+          && optStr(d, 'householdId', 40)
+          && (!('isChild' in d) || d.isChild is bool)
+          && (!('status' in d) || d.status in ['yes', 'maybe', 'no'])
+          && optStr(d, 'addedByUid', 128);
+      }
+      function hhDoc(pid, hid) { return /databases/$(database)/documents/parties/$(pid)/households/$(hid); }
+      function hhOf(d) { return d.get('householdId', ''); }
+      // Er jeg medlem af husstanden (før / efter denne skrivning – "efter" tillader batch: meld ind + sæt householdId)
+      function inHousehold(pid, hid) {
+        return hid != '' && exists(hhDoc(pid, hid)) && get(hhDoc(pid, hid)).data.memberUids.hasAny([request.auth.uid]);
+      }
+      function inHouseholdAfter(pid, hid) {
+        return hid != '' && existsAfter(hhDoc(pid, hid)) && getAfter(hhDoc(pid, hid)).data.memberUids.hasAny([request.auth.uid]);
+      }
+      function householdChangeOk(pid) {
+        let n = hhOf(request.resource.data);
+        return n == hhOf(resource.data) || n == '' || inHouseholdAfter(pid, n);
       }
       match /participants/{ppid} {
         allow read: if signedIn();
         allow create: if signedIn() && partyExists(pid)
           && validParticipant(request.resource.data)
-          && request.resource.data.ownerUid == request.auth.uid;
-        allow update: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid))
-          && validParticipant(request.resource.data) && unchanged(['ownerUid', 'createdAt']);
-        allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+          && (
+            // mig selv
+            (request.resource.data.ownerUid == request.auth.uid
+              && request.resource.data.get('addedByUid', request.auth.uid) == request.auth.uid
+              && (hhOf(request.resource.data) == '' || inHouseholdAfter(pid, hhOf(request.resource.data))))
+            // en person uden bruger, tilføjet af et medlem af husstanden (eller værten)
+            || (request.resource.data.ownerUid == ''
+              && request.resource.data.get('addedByUid', '') == request.auth.uid
+              && (inHouseholdAfter(pid, hhOf(request.resource.data)) || isAdmin(pid)))
+          );
+        allow update: if signedIn() && validParticipant(request.resource.data)
+          && unchanged(['createdAt', 'addedByUid'])
+          && (
+            // værten kan rette alt (men ikke flytte ejerskab)
+            (isAdmin(pid) && unchanged(['ownerUid']))
+            // ejeren retter sig selv
+            || (resource.data.ownerUid == request.auth.uid && unchanged(['ownerUid']) && householdChangeOk(pid))
+            // et medlem af husstanden retter en person uden bruger (navn, tlf., barn, status …)
+            || (resource.data.ownerUid == '' && request.resource.data.ownerUid == ''
+              && inHousehold(pid, hhOf(resource.data)) && householdChangeOk(pid))
+            // "Det er mig": overtag en voksen uden bruger (samme ID). Man bliver samtidig medlem af husstanden.
+            || (resource.data.ownerUid == '' && request.resource.data.ownerUid == request.auth.uid
+              && resource.data.get('isChild', false) != true
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUid', 'name', 'phone', 'status'])
+              && (hhOf(resource.data) == '' || inHouseholdAfter(pid, hhOf(resource.data))))
+          );
+        allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid)
+          || (resource.data.ownerUid == '' && inHousehold(pid, hhOf(resource.data))));
       }
 
       // ── Aktivitetslog (til notifikationer) ─────────────────────────────────
@@ -181,7 +265,7 @@ service cloud.firestore {
           && (!('servings' in d) || (d.servings is int && d.servings >= 0 && d.servings <= 1000))
           && optStr(d, 'note', 500)
           && (!('cost' in d) || (d.cost is int && d.cost >= 0 && d.cost <= 100000000))   // øre, max 1 mio. kr.
-          && (!('split' in d) || d.split in ['all', 'selected'])
+          && (!('split' in d) || d.split in ['all', 'selected', 'households'])
           && (!('among' in d) || (d.among is list && d.among.size() <= 200));
       }
       match /items/{iid} {
