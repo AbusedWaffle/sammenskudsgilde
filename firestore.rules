@@ -1,0 +1,141 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Sikkerhedsregler for Sammenskudsgilde
+//
+//  MODEL
+//  • Alle brugere logges automatisk ind med Firebase ANONYM login (skal slås til i
+//    Authentication). Det giver hver browser et stabilt uid, som reglerne kan bruge.
+//  • Et gilde findes kun via sit lange tilfældige ID (24 tegn base62 ≈ 143 bit).
+//    Man kan HENTE et gilde, hvis man kender ID'et, men man kan IKKE liste/søge i
+//    samlingen "parties". Under-samlingerne kan kun listes via en kendt sti, og
+//    collection-group-forespørgsler er ikke tilladt (ingen tilladende {path=**}-regler).
+//  • Opretteren er den, hvis uid står i creatorUid. Opretteren får desuden en hemmelig
+//    nøgle (gemt i localStorage + i et "admin-link"); kun SHA-256 af nøglen gemmes på
+//    gildet (creatorHash). Nøglen kan bruges fra en anden enhed ved at oprette
+//    claims/{uid} med { key } – reglerne tjekker hashen, og claims kan aldrig læses.
+//  • Alle der har linket kan se alt og tilføje sig selv, retter og udgifter.
+//    Kun opretteren kan rette/slette gildets detaljer og programpunkter.
+//    Man kan rette/slette sine egne deltager-/ret-poster (opretteren kan også).
+//
+//  ÆRLIGE BEGRÆNSNINGER (det er en vennegruppe-app, ikke en bank)
+//  • Linket ER adgangen. Den, der får linket videresendt, kan se navne og
+//    telefonnumre og tilføje/rette egne ting. Del det kun med gæsterne.
+//  • Anonyme uid'er er bundet til browseren. Rydder man browserdata eller skifter
+//    telefon, mister man retten til at rette sine gamle poster (opretteren kan stadig
+//    via admin-linket). "Jeg er ikke X" i appen skifter kun mellem personer, der er
+//    oprettet fra samme browser.
+//  • Hvem-som-helst med linket kan oprette mange deltagere/poster (spam). Der er
+//    størrelsesgrænser på felterne, men ingen hastighedsbegrænsning. Overvej App Check,
+//    hvis det bliver et problem.
+//  • Reglerne kan ikke garantere, at beløb er "rigtige" – kun at de er heltal i øre
+//    inden for et fornuftigt interval.
+//  • Når et gilde slettes, sletter appen først under-dokumenterne. Efterladte
+//    claims-dokumenter (fra andre enheder) er ulæselige og harmløse.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function partyDoc(pid) { return /databases/$(database)/documents/parties/$(pid); }
+    function partyExists(pid) { return exists(partyDoc(pid)); }
+    function isAdmin(pid) {
+      return signedIn() && (
+        get(partyDoc(pid)).data.creatorUid == request.auth.uid ||
+        exists(/databases/$(database)/documents/parties/$(pid)/claims/$(request.auth.uid)));
+    }
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function optStr(d, k, max) { return !(k in d) || isStr(d[k], 0, max); }
+    // Felter der ikke må ændres ved opdatering
+    function unchanged(keys) { return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys); }
+
+    // ── Gilder ────────────────────────────────────────────────────────────────
+    function validParty(d) {
+      return d.keys().hasOnly(['name', 'date', 'time', 'place', 'note', 'creatorUid', 'creatorHash', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['name', 'creatorUid', 'creatorHash'])
+        && isStr(d.name, 1, 120)
+        && optStr(d, 'date', 10) && optStr(d, 'time', 5)
+        && optStr(d, 'place', 300) && optStr(d, 'note', 2000)
+        && isStr(d.creatorHash, 64, 64);
+    }
+    match /parties/{pid} {
+      allow get: if signedIn();
+      allow list: if false;                                   // ingen søgning/listning af gilder
+      allow create: if signedIn() && pid.size() >= 20
+        && validParty(request.resource.data)
+        && request.resource.data.creatorUid == request.auth.uid;
+      allow update: if isAdmin(pid) && validParty(request.resource.data)
+        && unchanged(['creatorUid', 'creatorHash', 'createdAt']);
+      allow delete: if isAdmin(pid);
+
+      // ── Bevis for opretter-nøgle fra en anden enhed ─────────────────────────
+      match /claims/{uid} {
+        allow read: if false;                                 // nøglen kan aldrig læses tilbage
+        allow create, update: if signedIn() && uid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['key', 'createdAt'])
+          && request.resource.data.key is string
+          && hashing.sha256(request.resource.data.key).toHexString().lower()
+             == get(partyDoc(pid)).data.creatorHash.lower();
+        allow delete: if signedIn() && uid == request.auth.uid;
+      }
+
+      // ── Programpunkter / retter (forret, hovedret, 14:00 kaffe …) ───────────
+      function validEvent(d) {
+        return d.keys().hasOnly(['title', 'time', 'kind', 'order', 'ownerUid', 'createdAt'])
+          && isStr(d.title, 1, 80) && optStr(d, 'time', 5)
+          && (!('kind' in d) || d.kind in ['ret', 'program'])
+          && (!('order' in d) || d.order is number);
+      }
+      match /events/{eid} {
+        allow read: if signedIn();
+        allow create: if isAdmin(pid) && validEvent(request.resource.data);
+        allow update: if isAdmin(pid) && validEvent(request.resource.data);
+        allow delete: if isAdmin(pid);
+      }
+
+      // ── Deltagere ────────────────────────────────────────────────────────────
+      function validParticipant(d) {
+        return d.keys().hasOnly(['name', 'phone', 'ownerUid', 'createdAt'])
+          && isStr(d.name, 1, 60) && isStr(d.phone, 0, 20) && d.ownerUid is string;
+      }
+      match /participants/{ppid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid)
+          && validParticipant(request.resource.data)
+          && request.resource.data.ownerUid == request.auth.uid;
+        allow update: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid))
+          && validParticipant(request.resource.data) && unchanged(['ownerUid', 'createdAt']);
+        allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+      }
+
+      // ── Retter, aktiviteter og udgifter ──────────────────────────────────────
+      function validItem(d) {
+        return d.keys().hasOnly(['eventId', 'participantId', 'ownerUid', 'title', 'kind', 'servings',
+                                 'note', 'cost', 'split', 'among', 'createdAt'])
+          && isStr(d.title, 1, 100) && d.eventId is string && d.participantId is string
+          && d.ownerUid is string
+          && (!('kind' in d) || d.kind in ['ret', 'aktivitet', 'andet', 'udgift'])
+          && (!('servings' in d) || (d.servings is int && d.servings >= 0 && d.servings <= 1000))
+          && optStr(d, 'note', 500)
+          && (!('cost' in d) || (d.cost is int && d.cost >= 0 && d.cost <= 100000000))   // øre, max 1 mio. kr.
+          && (!('split' in d) || d.split in ['all', 'selected'])
+          && (!('among' in d) || (d.among is list && d.among.size() <= 200));
+      }
+      match /items/{iid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && partyExists(pid)
+          && validItem(request.resource.data)
+          && request.resource.data.ownerUid == request.auth.uid;
+        allow update: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid))
+          && validItem(request.resource.data) && unchanged(['ownerUid', 'createdAt']);
+        allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin(pid));
+      }
+    }
+
+    // Alt andet er lukket.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
