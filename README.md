@@ -44,6 +44,7 @@ Fanen **👥 Gæster** er gæstelisten: øverst står, hvor mange **voksne og b�
   - **Alle (pr. person):** lige meget pr. voksen blandt dem, der kommer. **Børn betaler ikke med**, og det gør dem, der har meldt **Kommer ikke**, heller ikke.
   - **Pr. husstand:** hver husstand betaler lige meget, uanset hvor mange de er, og uanset hvor mange børn de har. Du kan vælge alle husstande eller kun nogle.
   - **Udvalgte:** kun de voksne, du vælger (fx vin kun til dem, der drikker). Børn står ikke på listen.
+  - **Ingen (betaler selv):** prisen står på retten/udgiften (mærket "deles ikke – betaler selv"), men den er **slet ikke med i regnskabet**. Den, der har betalt, betaler selv, og ingen skylder noget for den. Du kan vælge det, både når du tilføjer, og når du retter.
 - Har et barn lagt ud for noget, får barnets husstand (eller barnet) stadig pengene tilbage.
 - Reglerne gælder også for udgifter, der allerede er skrevet på: retter nogen, om de er barn, regnes det hele om med det samme.
 - Udgifter, der ikke hører til en ret (leje af lokale, vin, indkøb), tilføjes under fanen **💰 Regnskab** med **Tilføj en udgift**.

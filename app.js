@@ -3,7 +3,7 @@ import { settle, parseKr, formatKr, headcount, statusOf, unitsOf } from './settl
 import { cleanPhone, prettyPhone, mobilepayPhone, isValidPhone } from './util.js';
 import { pushSupport, subscribePush, localNotification, registerServiceWorker, isIOS as isIOSDevice, isStandalone, deviceLabel } from './push.js';
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const DEFAULT_TOPICS = { guests: true, items: true, party: true, costs: true, reminder: true };
 const TOPIC_LABELS = [['guests', '👋 Nye gæster'], ['items', '🍲 Nye retter og aktiviteter'], ['party', '📅 Ændringer i gildet og programmet'], ['costs', '💰 Nye udgifter'], ['reminder', '⏰ Påmindelse før festen']];
 
@@ -298,7 +298,7 @@ function itemRow(it) {
   const [ic] = ITEM_KINDS[it.kind] || ITEM_KINDS.ret;
   const bits = [esc(pName(it.participantId))];
   if (it.servings) bits.push(`til ${it.servings} pers.`);
-  if (it.cost) bits.push(`<span class="cost">${formatKr(it.cost)}</span> (${splitText(it, true)})`);
+  if (it.cost) bits.push(`<span class="cost">${formatKr(it.cost)}</span> (${splitText(it, true)})`);   // "Ingen": (deles ikke – betaler selv)
   const mine = it.participantId === myId();
   return `<li class="item${mine ? ' mine' : ''}" data-t="item"><span class="it-ic">${ic}</span><div class="grow">
     <div class="t">${esc(it.title)}</div><div class="s">${bits.join(' · ')}</div>${it.note ? `<div class="n">${esc(it.note)}</div>` : ''}</div>
@@ -397,6 +397,7 @@ function myHouseholdCard(m) {
 }
 
 function splitText(it, short = false) {
+  if (it.split === 'none') return short ? 'deles ikke – betaler selv' : '<span class="tag none" data-t="split-none-tag">deles ikke – betaler selv</span>';
   if (it.split === 'households') {
     const n = (it.among || []).length;
     return n ? `deles pr. husstand mellem ${n}` : 'deles pr. husstand';
@@ -436,6 +437,13 @@ function moneyTab() {
   const unit = id => r.units.find(u => u.id === id);
   const costItems = S.items.filter(i => i.cost > 0).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
   const addBtn = `<button class="btn block" data-act="new-item" data-event="" data-kind="udgift" data-t="add-expense">🧾 Tilføj en udgift (vin, leje, indkøb …)</button>`;
+  const unsharedCard = r.unshared.length ? `<p class="small muted" style="margin:10px 0 0" data-t="unshared-note">${formatKr(r.unsharedTotal)} er markeret „Ingen“ (deles ikke) – den, der har betalt, betaler selv, og det er ikke med i regnskabet.</p>` : '';
+  const costList = () => `<div class="card"><h2>Udgifter</h2><ul class="items" style="padding:0;margin-top:6px">
+    ${costItems.map(i => `<li class="item${i.split === 'none' ? ' unshared' : ''}" data-t="cost-item"><span class="it-ic">${(ITEM_KINDS[i.kind] || ITEM_KINDS.ret)[0]}</span><div class="grow"><div class="t">${esc(i.title)}</div>
+      <div class="s">Betalt af ${esc(pName(i.participantId))} · ${splitText(i)}</div></div>
+      <span class="cost">${formatKr(i.cost)}</span>${canEditItem(i) ? `<button class="btn sm ghost" data-act="edit-item" data-id="${i.id}" aria-label="Ret">✏️</button>` : ''}</li>`).join('')}
+  </ul>${unsharedCard}<div style="margin-top:12px">${addBtn}</div></div>`;
+  if (!r.total && costItems.length) return `<div class="card" data-t="summary"><h2>Regnskab</h2><p class="muted" style="margin:8px 0 0">Alle er kvit – ingen skylder noget. 🎉</p></div>${costList()}`;
   if (!r.total) return `<div class="card empty"><div class="big">💰</div><p>Ingen udgifter endnu. Når nogen skriver en pris på det, de tager med, eller tilføjer en udgift, regner appen ud hvem der skylder hvem – samlet pr. husstand.</p>${addBtn}</div>`;
   const hasHh = r.units.some(u => u.household);
   const transfers = r.transfers.map(t => {
@@ -473,13 +481,9 @@ function moneyTab() {
     <table class="tbl" style="margin-top:6px" data-t="table"><thead><tr><th>${hasHh ? 'Husstand' : 'Navn'}</th><th>Betalt</th><th>Andel</th><th>Saldo</th></tr></thead><tbody>
     ${r.units.map(u => { const b = r.balance[u.id], l = unitLabel(u); return `<tr data-t="unit-row" data-unit="${esc(u.id)}"><td>${esc(l.name)}${u.id === meUnit ? ' <span class="tag">dig</span>' : ''}${u.household ? `<div class="small muted">${u.members.length} pers.</div>` : ''}</td><td>${formatKr(r.paid[u.id])}</td><td>${formatKr(r.share[u.id])}</td><td class="${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${formatKr(b)}</td></tr>`; }).join('')}
     </tbody></table>
-    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ og „udvalgte“ er pr. voksen: børn og dem, der har meldt „Kommer ikke“, betaler ikke med. „Pr. husstand“ er lige meget pr. husstand, uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
+    <p class="small muted" style="margin:10px 0 0">Plus = skal have penge tilbage. Minus = skylder. „Deles af alle“ og „udvalgte“ er pr. voksen: børn og dem, der har meldt „Kommer ikke“, betaler ikke med. „Pr. husstand“ er lige meget pr. husstand, uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Udgifter med „Ingen“ er ikke med – den, der har betalt, betaler selv. Deles et beløb ikke lige op, fordeles de sidste ører på de første tilmeldte.</p>
   </div>
-  <div class="card"><h2>Udgifter</h2><ul class="items" style="padding:0;margin-top:6px">
-    ${costItems.map(i => `<li class="item"><span class="it-ic">${(ITEM_KINDS[i.kind] || ITEM_KINDS.ret)[0]}</span><div class="grow"><div class="t">${esc(i.title)}</div>
-      <div class="s">Betalt af ${esc(pName(i.participantId))} · ${splitText(i)}</div></div>
-      <span class="cost">${formatKr(i.cost)}</span>${canEditItem(i) ? `<button class="btn sm ghost" data-act="edit-item" data-id="${i.id}" aria-label="Ret">✏️</button>` : ''}</li>`).join('')}
-  </ul><div style="margin-top:12px">${addBtn}</div></div>`;
+  ${costList()}`;
 }
 
 function shareTab() {
@@ -528,7 +532,7 @@ function helpSheet() {
       <li><b>„Det er mig“:</b> Har en anden skrevet dig på, så åbn linket og tryk „Det er mig“ ved dit navn – det gælder også børn. Så overtager du pladsen, og det der står på dig følger med.</li>
       <li><b>Er du barn?</b> Sæt flueben ved „Jeg er barn“, når du tilmelder dig. Så behøver du ikke skrive telefonnummer, og du betaler ikke med, når en udgift deles pr. person.</li>
       <li><b>Ret din tilmelding</b> (navn, telefon, barn, om du kommer) under ⚙️ → „Ret min tilmelding“, eller tryk på dit navn på gæstelisten.</li>
-      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle voksne (pr. person), pr. husstand (lige meget hver) eller mellem udvalgte voksne. <b>Børn betaler ikke med</b>, når der deles pr. person, og heller ikke dem, der har meldt „Kommer ikke“. Deles der pr. husstand, betaler husstanden det samme uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
+      <li><b>Regnskab:</b> Hver udgift kan deles mellem alle voksne (pr. person), pr. husstand (lige meget hver) eller mellem udvalgte voksne – eller <b>Ingen</b>, hvis du betaler selv: så står prisen på retten, men den er slet ikke med i regnskabet. <b>Børn betaler ikke med</b>, når der deles pr. person, og heller ikke dem, der har meldt „Kommer ikke“. Deles der pr. husstand, betaler husstanden det samme uanset antal børn. Har et barn lagt ud, får det pengene tilbage. Regnskabet samles pr. husstand, så hver husstand højst skal lave få overførsler.</li>
       <li><b>Betal med MobilePay:</b> Ved hver gæld står modtagerens nummer og beløbet, med knapper til at kopiere og til at forsøge at åbne MobilePay.</li>
     </ol>
     <h3>Godt at vide</h3>
@@ -599,9 +603,9 @@ function itemSheet(it, eventId = '', kind = 'ret') {
     <label class="f"><span>${isExpense ? 'Beløb i kr. *' : 'Udgift i kr. (valgfri)'}</span><input type="text" name="cost" inputmode="decimal" value="${it?.cost ? esc((it.cost / 100).toFixed(2).replace('.', ',')) : ''}" placeholder="F.eks. 149,95"></label>
     <div id="split-box" style="${it?.cost || isExpense ? '' : 'display:none'}">
       <label class="f"><span>Hvem skal dele udgiften?</span></label>
-      <div class="seg seg3" data-seg="split"><button type="button" data-v="all" class="${split === 'all' ? 'on' : ''}" data-t="split-all">Alle<small>pr. person</small></button><button type="button" data-v="households" class="${split === 'households' ? 'on' : ''}" data-t="split-households">Pr. husstand<small>lige meget hver</small></button><button type="button" data-v="selected" class="${split === 'selected' ? 'on' : ''}" data-t="split-selected">Udvalgte<small>personer</small></button></div>
+      <div class="seg seg3 seg4" data-seg="split"><button type="button" data-v="all" class="${split === 'all' ? 'on' : ''}" data-t="split-all">Alle<small>pr. person</small></button><button type="button" data-v="households" class="${split === 'households' ? 'on' : ''}" data-t="split-households">Pr. husstand<small>lige meget hver</small></button><button type="button" data-v="selected" class="${split === 'selected' ? 'on' : ''}" data-t="split-selected">Udvalgte<small>personer</small></button><button type="button" data-v="none" class="${split === 'none' ? 'on' : ''}" data-t="split-none">Ingen<small>betaler selv</small></button></div>
       <input type="hidden" name="split" value="${split}">
-      <p class="small muted split-help" style="margin:6px 0 0">${SPLIT_HELP[split]}</p>
+      <p class="small muted split-help" style="margin:6px 0 0" data-t="split-help">${SPLIT_HELP[split] || SPLIT_HELP.all}</p>
       <div class="checks" id="among" style="${split === 'selected' ? '' : 'display:none'}">
         ${sortedPeople().filter(p => !p.isChild).map(p => `<label><input type="checkbox" name="among" value="${p.id}" ${among.has(p.id) ? 'checked' : ''}> ${esc(p.name)}${statusOf(p) === 'no' ? ' <span class="small muted">(kommer ikke)</span>' : ''}</label>`).join('')}
         ${S.participants.some(p => p.isChild) ? '<p class="small muted" style="margin:2px 4px">Børn er ikke med på listen – de betaler ikke med ved deling pr. person.</p>' : ''}
@@ -623,6 +627,7 @@ const SPLIT_HELP = {
   all: 'Deles lige mellem de voksne, der kommer. Børn og dem, der har meldt „Kommer ikke“, betaler ikke med.',
   households: 'Hver husstand betaler lige meget, uanset hvor mange de er, og uanset antal børn. Enlige tæller som en husstand.',
   selected: 'Deles lige mellem de voksne, du vælger. Børn betaler ikke med.',
+  none: 'Deles ikke: prisen står på retten, men kommer ikke med i regnskabet. Den, der har betalt, betaler selv, og ingen skylder noget for den.',
 };
 
 // ── Husstande: ark ───────────────────────────────────────────────────────
@@ -1190,21 +1195,30 @@ async function onSubmit(e) {
       among = on.length === boxes.length ? [] : on;   // alle valgt = alle husstande (også nye)
     }
     if (cost && split === 'selected' && !among.length) return err('Vælg mindst én voksen – børn betaler ikke med ved deling pr. person.');
-    const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost ? among : [] };
+    const data = { title, kind, servings, note: f.note.value.trim(), cost, split: cost ? split : 'all', among: cost && split !== 'none' ? among : [] };
+    const unsharedNow = cost > 0 && split === 'none';
     return busy(async () => {
       const who = (f.who && f.who.value !== myId() ? pName(f.who.value) : me()?.name) || 'Nogen';
       if (f.dataset.id) {
         const old = S.items.find(x => x.id === f.dataset.id);
         await store.update(S.pid, 'items', f.dataset.id, data);
-        if (old && (old.cost || 0) !== cost) store.logActivity(S.pid, 'cost', `${pName(old.participantId)}: udgiften for ${title} er nu ${formatKr(cost)}`, { participantId: myId() || '' });
+        const wasUnshared = (old?.cost || 0) > 0 && old.split === 'none';
+        if (old && ((old.cost || 0) !== cost || wasUnshared !== unsharedNow)) {
+          const t = unsharedNow ? `${pName(old.participantId)}: ${title} (${formatKr(cost)}) deles ikke længere – betaler selv`
+            : wasUnshared && cost ? `${pName(old.participantId)}: ${title} (${formatKr(cost)}) deles nu i regnskabet`
+            : `${pName(old.participantId)}: udgiften for ${title} er nu ${formatKr(cost)}`;
+          store.logActivity(S.pid, 'cost', t, { participantId: myId() || '' });
+        }
       } else {
         const forId = f.who?.value || myId();
         await store.add(S.pid, 'items', { ...data, eventId: f.dataset.event || '', participantId: forId });
         const ev = S.events.find(x => x.id === f.dataset.event);
-        const text = kind === 'udgift' ? `${who} har lagt ud for ${title} (${formatKr(cost)})`
-          : kind === 'aktivitet' ? `${who} står for ${title}${ev ? ' (' + ev.title + ')' : ''}`
-          : `${who} tager ${title} med${ev ? ' til ' + ev.title.toLowerCase() : ''}${cost ? ' (' + formatKr(cost) + ')' : ''}`;
-        store.logActivity(S.pid, kind === 'udgift' ? 'cost' : 'item', text, { participantId: myId() || '', hasCost: kind !== 'udgift' && cost > 0 });
+        const costTxt = cost ? ' (' + formatKr(cost) + (unsharedNow ? ', betaler selv' : '') + ')' : '';
+        const text = kind === 'udgift' ? (unsharedNow ? `${who} har betalt ${title} selv (${formatKr(cost)} – deles ikke)` : `${who} har lagt ud for ${title} (${formatKr(cost)})`)
+          : kind === 'aktivitet' ? `${who} står for ${title}${ev ? ' (' + ev.title + ')' : ''}${costTxt}`
+          : `${who} tager ${title} med${ev ? ' til ' + ev.title.toLowerCase() : ''}${costTxt}`;
+        // "Ingen" påvirker ikke regnskabet → ikke en udgifts-notifikation
+        store.logActivity(S.pid, kind === 'udgift' && !unsharedNow ? 'cost' : 'item', text, { participantId: myId() || '', hasCost: kind !== 'udgift' && cost > 0 && !unsharedNow });
       }
       closeSheet(); toast(f.dataset.id ? 'Gemt' : 'Tilføjet – tak! 🙌');
     });

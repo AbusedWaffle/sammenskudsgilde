@@ -265,7 +265,7 @@ service cloud.firestore {
           && (!('servings' in d) || (d.servings is int && d.servings >= 0 && d.servings <= 1000))
           && optStr(d, 'note', 500)
           && (!('cost' in d) || (d.cost is int && d.cost >= 0 && d.cost <= 100000000))   // øre, max 1 mio. kr.
-          && (!('split' in d) || d.split in ['all', 'selected', 'households'])
+          && (!('split' in d) || d.split in ['all', 'selected', 'households', 'none'])   // 'none' = deles ikke (betaler selv)
           && (!('among' in d) || (d.among is list && d.among.size() <= 200));
       }
       match /items/{iid} {

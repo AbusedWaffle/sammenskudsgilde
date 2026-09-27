@@ -67,15 +67,17 @@ export function headcount(participants) {
 /**
  * Beregn regnskab – samlet pr. husstand.
  * @param participants [{id, name, householdId?, isChild?, status?}] – rækkefølgen bestemmer hvem der får ekstra øre
- * @param costs [{payer (deltager-id), amount (øre), split: 'all'|'selected'|'households', among: [ids]}]
+ * @param costs [{payer (deltager-id), amount (øre), split: 'all'|'selected'|'households'|'none', among: [ids]}]
  *   'all'        – deles pr. person mellem de voksne, der ikke har meldt "Kommer ikke". Børn betaler ikke med.
  *   'selected'   – deles pr. person mellem de valgte voksne (among = deltager-id'er; børn i listen ignoreres).
  *                  Er der KUN valgt børn (gamle poster), deles beløbet mellem de voksne i børnenes husstande;
  *                  har de ingen voksne, deles det som 'all'.
  *   'households' – lige stor andel pr. husstand, uanset antal børn; among = husstands-/enheds-id'er (tom = alle husstande med nogen der kommer)
+ *   'none'       – deles ikke: betaleren betaler selv. Posten tæller slet ikke med (hverken betalt, andel eller total)
+ *                  og ændrer ingens saldo; den returneres i `unshared` så den stadig kan vises.
  * Et barn, der har lagt ud, får stadig pengene tilbage (betaling tæller altid).
  * @param households [{id, name}] – husstands-dokumenter (valgfri; uden dem er alle deres egen husstand)
- * @returns {units, unitOf, paid, share, balance, total, entries, transfers} – nøgler er enheds-id'er.
+ * @returns {units, unitOf, paid, share, balance, total, entries, transfers, unshared, unsharedTotal} – nøgler er enheds-id'er.
  *   Uden husstande er enheds-id = deltager-id, så resultatet er det samme som et pr.-person-regnskab.
  *   balance > 0: skal have penge; balance < 0: skylder.
  */
@@ -96,10 +98,13 @@ export function settle(participants, costs, households = []) {
   const paid = {}, share = {};
   for (const id of uids) { paid[id] = 0; share[id] = 0; }
   let total = 0;
-  const entries = [];
+  const entries = [], unshared = [];
+  let unsharedTotal = 0;
   for (const c of costs) {
     const amount = Math.round(c.amount || 0);
-    if (!(amount > 0) || !known.has(c.payer)) continue;
+    if (!(amount > 0)) continue;
+    if (c.split === 'none') { unshared.push({ ...c, amount }); unsharedTotal += amount; continue; }   // deles ikke
+    if (!known.has(c.payer)) continue;
     let perUnit;
     let among;
     if (c.split === 'households') {
@@ -130,7 +135,7 @@ export function settle(participants, costs, households = []) {
   }
   const balance = {};
   for (const id of uids) balance[id] = paid[id] - share[id];
-  return { units, unitOf, paid, share, balance, total, entries, transfers: minimalTransfers(balance, uids) };
+  return { units, unitOf, paid, share, balance, total, entries, transfers: minimalTransfers(balance, uids), unshared, unsharedTotal };
 }
 
 /**

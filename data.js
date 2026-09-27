@@ -11,7 +11,7 @@
 //                                         status ('yes'|'maybe'|'no', mangler = 'yes'), addedByUid
 //   parties/{partyId}/households/{id}     name, memberUids [uid'er med bruger i husstanden], createdByUid
 //   parties/{partyId}/items/{id}          eventId, participantId, ownerUid, title, kind, servings, note,
-//                                         cost (øre), split ('all'|'selected'|'households'),
+//                                         cost (øre), split ('all'|'selected'|'households'|'none' = deles ikke),
 //                                         among [participantIds] eller [husstands-/enheds-id'er] ved 'households'
 //   parties/{partyId}/claims/{uid}        { key } – bevis for opretter-nøgle (kan ikke læses af nogen)
 //   parties/{partyId}/activity/{id}       type, text, actorUid, participantId, hasCost, createdAt – til notifikationer
